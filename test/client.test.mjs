@@ -438,6 +438,157 @@ printf '200\\napplication/json'
   assert.match(result.stdout, /domain=ddns\.example\.com/);
 });
 
+test("client auto-detects both public IP families without persisting detected values", async () => {
+  const home = await mkdtemp(join(tmpdir(), "cf-ddns-manager-"));
+  const fakeBin = join(home, "bin");
+  await mkdir(fakeBin, { recursive: true });
+
+  const fakeCrontab = join(fakeBin, "crontab");
+  await writeFile(
+    fakeCrontab,
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "-l" ]]; then
+  cat "\${HOME}/crontab.current" 2>/dev/null || exit 1
+else
+  cp "$1" "\${HOME}/crontab.installed"
+fi
+`,
+  );
+  await chmod(fakeCrontab, 0o755);
+
+  const fakeCurl = join(fakeBin, "curl");
+  await writeFile(
+    fakeCurl,
+    `#!/usr/bin/env bash
+set -euo pipefail
+args="$*"
+if [[ "$args" == *"api.ipify.org"* ]]; then
+  printf '198.51.100.7'
+  exit 0
+fi
+if [[ "$args" == *"api6.ipify.org"* ]]; then
+  printf '2001:db8::7'
+  exit 0
+fi
+out=""
+for ((i=1; i<=$#; i++)); do
+  if [[ "\${!i}" == "--output" ]]; then
+    j=$((i + 1))
+    out="\${!j}"
+  fi
+done
+printf '%s\\n' "$args" > "\${HOME}/update.args"
+printf '{"ok":true}\\n' > "$out"
+printf '200\\napplication/json'
+`,
+  );
+  await chmod(fakeCurl, 0o755);
+
+  const result = spawnSync(
+    "bash",
+    [
+      clientPath,
+      "--install",
+      "--manage-endpoint",
+      "worker.example",
+      "--ddns-token",
+      "client-secret",
+      "--ddns-suffix",
+      "home.example.com",
+      "--sub-domain",
+      "nas",
+    ],
+    {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+      encoding: "utf8",
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const updateArgs = await readFile(join(home, "update.args"), "utf8");
+  assert.match(updateArgs, /ipv4=198\.51\.100\.7/);
+  assert.match(updateArgs, /ipv6=2001:db8::7/);
+
+  const config = await readFile(join(home, ".config/cf-ddns-manager/client.env"), "utf8");
+  assert.match(config, /^IPV4=''$/m);
+  assert.match(config, /^IPV6=''$/m);
+});
+
+test("client retries manager update over IPv4 when IPv6 route returns an HTML 403", async () => {
+  const home = await mkdtemp(join(tmpdir(), "cf-ddns-manager-"));
+  const fakeBin = join(home, "bin");
+  await mkdir(fakeBin, { recursive: true });
+
+  const fakeCurl = join(fakeBin, "curl");
+  await writeFile(
+    fakeCurl,
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+ipv4="false"
+args="$*"
+for ((i=1; i<=$#; i++)); do
+  case "\${!i}" in
+    --output)
+      j=$((i + 1))
+      out="\${!j}"
+      ;;
+    --ipv4)
+      ipv4="true"
+      ;;
+  esac
+done
+if [[ "$ipv4" == "true" ]]; then
+  printf '%s\\n' "$args" > "\${HOME}/retry.args"
+  printf '{"ok":true}\\n' > "$out"
+  printf '200\\napplication/json'
+else
+  printf '<!doctype html><html><body>forbidden</body></html>\\n' > "$out"
+  printf '403\\ntext/html'
+fi
+`,
+  );
+  await chmod(fakeCurl, 0o755);
+
+  const result = spawnSync(
+    "bash",
+    [
+      clientPath,
+      "--manage-endpoint",
+      "worker.example",
+      "--ddns-token",
+      "client-secret",
+      "--ddns-suffix",
+      "home.example.com",
+      "--sub-domain",
+      "nas",
+      "--record-type",
+      "A",
+      "--ipv4",
+      "198.51.100.8",
+    ],
+    {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+      encoding: "utf8",
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(await readFile(join(home, "retry.args"), "utf8"), /--ipv4/);
+  assert.match(result.stdout, /"ok":true/);
+});
+
 test("client rejects manage endpoint with wrong project path before calling curl", async () => {
   const home = await mkdtemp(join(tmpdir(), "cf-ddns-manager-"));
   const fakeBin = join(home, "bin");

@@ -10,7 +10,7 @@ Cloudflare Worker DDNS 管理器，内置 Web Manager、KV-backed scoped token r
 - Web Manager：查看记录、创建客户端 Token、启用/禁用/删除 Token、删除 DNS 记录。
 - 两级鉴权：Admin Token 管理全部记录；Scoped Token 只能管理自己创建的记录。
 - 多 DDNS 后缀：支持 `home.example.com`、`lab.example.net` 等多 Zone 配置。
-- 自动识别调用方公网 IP：未提交 IP 时读取 `CF-Connecting-IP`。
+- 自动识别公网 IP：客户端优先分别探测 IPv4/IPv6；未提交 IP 时 Worker 仍可读取 `CF-Connecting-IP` 兜底。
 - IPv4/IPv6：支持 A、AAAA、AUTO、BOTH 更新。
 - KV 记录归属：Token 和记录归属保存在 Cloudflare KV。
 - 本地客户端：可安装到当前用户 crontab，每 5 分钟自动更新。
@@ -229,6 +229,8 @@ crontab 会引用这个固定路径，不会引用你执行命令时的当前目
 
 如果 `--ddns-suffix` 和管理域名相同，可以省略。未指定 `--sub-domain` 时，客户端默认使用本机短 hostname。
 
+默认 `--record-type auto` 会在客户端分别尝试 `curl -4` 和 `curl -6` 探测公网 IPv4/IPv6。机器同时具备 IPv4 和 IPv6 出口时，会同时提交 A 和 AAAA；只有一种出口可用时，只提交可探测到的记录。探测到的地址只用于当次更新，不会固化写入 `client.env`。
+
 指定 IPv4：
 
 ```bash
@@ -295,8 +297,8 @@ Authorization: Bearer <DDNS_ADMIN_TOKEN 或 scoped token>
 | `domain` | 是 | Worker 允许的 DDNS 服务后缀，例如 `home.example.com` |
 | `host` | 是 | 主机短名，例如 `nas`，不要传完整域名 |
 | `type` | 否 | `auto`、`A`、`AAAA`、`both`，默认 `auto` |
-| `ipv4` | 否 | 显式 IPv4，不传则 Worker 根据调用方 IP 推断 |
-| `ipv6` | 否 | 显式 IPv6，不传则 Worker 根据调用方 IP 推断 |
+| `ipv4` | 否 | 显式 IPv4；客户端未提交时，Worker 可根据调用方 IP 推断 |
+| `ipv6` | 否 | 显式 IPv6；客户端未提交时，Worker 可根据调用方 IP 推断 |
 | `ttl` | 否 | 覆盖 DNS TTL |
 | `proxied` | 否 | 覆盖 Cloudflare 代理开关 |
 

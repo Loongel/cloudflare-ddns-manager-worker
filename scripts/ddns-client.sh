@@ -8,6 +8,9 @@ APP_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/${APP_NAME}"
 INSTALL_SCRIPT="${APP_DIR}/ddns-client.sh"
 LOG_FILE="${HOME}/.cache/${APP_NAME}/client.log"
 CLIENT_SCRIPT_URL="${CLIENT_SCRIPT_URL:-https://raw.githubusercontent.com/Loongel/cloudflare-ddns-manager-worker/main/scripts/ddns-client.sh}"
+IPV4_LOOKUP_URL="${IPV4_LOOKUP_URL:-https://api.ipify.org}"
+IPV6_LOOKUP_URL="${IPV6_LOOKUP_URL:-https://api6.ipify.org}"
+CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-8}"
 
 URL=""
 TOKEN=""
@@ -20,6 +23,8 @@ TTL=""
 PROXIED=""
 MODE="run"
 CONFIG_LOADED="false"
+EFFECTIVE_IPV4=""
+EFFECTIVE_IPV6=""
 
 usage() {
   cat <<'EOF'
@@ -39,8 +44,8 @@ Options:
   --ddns-suffix DOMAIN  DDNS suffix. Defaults to the --manage-endpoint hostname.
   --sub-domain NAME     Sub-domain before the suffix. Defaults to `hostname -s`.
   --record-type TYPE    auto, A, AAAA, or both. Defaults to auto.
-  --ipv4 IP             Explicit IPv4 address. If omitted, the Worker detects caller IP.
-  --ipv6 IP             Explicit IPv6 address. If omitted, the Worker detects caller IP.
+  --ipv4 IP             Explicit IPv4 address. If omitted, the client tries curl -4 detection.
+  --ipv6 IP             Explicit IPv6 address. If omitted, the client tries curl -6 detection.
   --ttl SECONDS         Override DNS record TTL.
   --proxied BOOL        Override Cloudflare proxy setting: true or false.
   --config FILE         Load options from a config file.
@@ -140,6 +145,35 @@ is_ipv6() {
   [[ "$1" =~ ^[0-9A-Fa-f:]+$ && "$1" == *:* && "$1" != ":" ]]
 }
 
+detect_public_ip() {
+  local family="$1"
+  local url="$2"
+  local candidate=""
+  candidate="$(curl "--${family}" --silent --show-error --max-time "$CURL_CONNECT_TIMEOUT" "$url" 2>/dev/null | tr -d '[:space:]' || true)"
+  case "$family" in
+    ipv4) is_ipv4 "$candidate" && printf '%s' "$candidate" ;;
+    ipv6) is_ipv6 "$candidate" && printf '%s' "$candidate" ;;
+  esac
+  return 0
+}
+
+fill_effective_ips() {
+  EFFECTIVE_IPV4="$IPV4"
+  EFFECTIVE_IPV6="$IPV6"
+  case "$TYPE" in
+    AUTO|BOTH)
+      [[ -n "$EFFECTIVE_IPV4" ]] || EFFECTIVE_IPV4="$(detect_public_ip ipv4 "$IPV4_LOOKUP_URL")"
+      [[ -n "$EFFECTIVE_IPV6" ]] || EFFECTIVE_IPV6="$(detect_public_ip ipv6 "$IPV6_LOOKUP_URL")"
+      ;;
+    A)
+      [[ -n "$EFFECTIVE_IPV4" ]] || EFFECTIVE_IPV4="$(detect_public_ip ipv4 "$IPV4_LOOKUP_URL")"
+      ;;
+    AAAA)
+      [[ -n "$EFFECTIVE_IPV6" ]] || EFFECTIVE_IPV6="$(detect_public_ip ipv6 "$IPV6_LOOKUP_URL")"
+      ;;
+  esac
+}
+
 print_body_excerpt() {
   local file="$1"
   if [[ ! -s "$file" ]]; then
@@ -184,6 +218,12 @@ print_endpoint_error() {
   printf 'DDNS 更新失败。HTTP %s：\n' "$http_code" >&2
   sed -n '1,20p' "$body_file" >&2
   die "请检查 endpoint、token、后缀和节点名称。"
+}
+
+should_retry_ipv4() {
+  local http_code="$1"
+  local body_file="$2"
+  [[ "$http_code" == "403" ]] && body_looks_like_html "$body_file"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -433,8 +473,9 @@ remove_local_files() {
 
 run_update() {
   validate_required
+  fill_effective_ips
 
-  local body_file meta_file error_file curl_status http_code content_type
+  local body_file meta_file error_file curl_status http_code content_type retry_ipv4
   body_file="$(mktemp)"
   meta_file="$(mktemp)"
   error_file="$(mktemp)"
@@ -452,8 +493,8 @@ run_update() {
     --data-urlencode "type=${TYPE}"
   )
 
-  [[ -z "$IPV4" ]] || args+=(--data-urlencode "ipv4=${IPV4}")
-  [[ -z "$IPV6" ]] || args+=(--data-urlencode "ipv6=${IPV6}")
+  [[ -z "$EFFECTIVE_IPV4" ]] || args+=(--data-urlencode "ipv4=${EFFECTIVE_IPV4}")
+  [[ -z "$EFFECTIVE_IPV6" ]] || args+=(--data-urlencode "ipv6=${EFFECTIVE_IPV6}")
   [[ -z "$TTL" ]] || args+=(--data-urlencode "ttl=${TTL}")
   [[ -z "$PROXIED" ]] || args+=(--data-urlencode "proxied=${PROXIED}")
 
@@ -465,6 +506,22 @@ run_update() {
 
   http_code="$(sed -n '1p' "$meta_file")"
   content_type="$(sed -n '2p' "$meta_file")"
+  retry_ipv4="false"
+  if should_retry_ipv4 "${http_code:-000}" "$body_file"; then
+    retry_ipv4="true"
+  fi
+  if [[ "$retry_ipv4" == "true" ]]; then
+    : > "$body_file"
+    : > "$meta_file"
+    : > "$error_file"
+    if curl --ipv4 "${args[@]}" "$URL" > "$meta_file" 2> "$error_file"; then
+      curl_status=0
+    else
+      curl_status=$?
+    fi
+    http_code="$(sed -n '1p' "$meta_file")"
+    content_type="$(sed -n '2p' "$meta_file")"
+  fi
   if [[ "$curl_status" -ne 0 ]]; then
     print_endpoint_error "${http_code:-000}" "$content_type" "$body_file" "$(tr '\n' ' ' < "$error_file" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
   fi
