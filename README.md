@@ -27,6 +27,12 @@ https://deploy.workers.cloudflare.com/?url=https://github.com/Loongel/cloudflare
 
 Cloudflare 会基于仓库里的 `wrangler.jsonc` 创建 Worker，并自动 provision `DDNS_TOKENS` KV namespace。
 
+也可以用一行命令从 GitHub 在线拉取项目并运行高级部署脚本。先替换里面的域名、Zone ID 和 Token：
+
+```bash
+WORKER_NAME=cf-ddns MANAGE_ENDPOINT=ddns.example.com DDNS_DOMAIN=home.example.com CF_ZONE_ID=your-cloudflare-zone-id CF_API_TOKEN=your-zone-dns-edit-token bash -c 'set -euo pipefail; tmp="$(mktemp -d)"; curl -fsSL https://github.com/Loongel/cloudflare-ddns-manager-worker/archive/refs/heads/main.tar.gz | tar -xz -C "$tmp" --strip-components=1; cd "$tmp"; npm install; npm run deploy:test'
+```
+
 部署时需要填写这些 secrets：
 
 | Secret | 用途 |
@@ -196,6 +202,12 @@ npm run deploy
 ## Client Installation
 
 推荐在客户端机器上使用 scoped token。客户端只保存 DDNS token，只访问你自己的 Worker，不保存 Cloudflare API Token。
+
+在线一行安装，先替换 Worker 域名、Token、DDNS 后缀和节点名：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Loongel/cloudflare-ddns-manager-worker/main/scripts/ddns-client.sh | bash -s -- --install --manage-endpoint your-worker.workers.dev --ddns-token 'your-scoped-token' --ddns-suffix home.example.com --sub-domain nas
+```
 
 安装到当前用户 crontab：
 
