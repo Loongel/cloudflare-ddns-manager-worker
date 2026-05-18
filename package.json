@@ -2,7 +2,7 @@
   "name": "cloudflare-ddns-manager-worker",
   "version": "0.1.0",
   "private": true,
-  "description": "Cloudflare Worker DDNS service with a web manager and cron-friendly local client.",
+  "description": "Cloudflare Worker DDNS manager with one-click deploy, KV-backed scoped tokens, and a cron-friendly client.",
   "license": "MIT",
   "type": "module",
   "scripts": {

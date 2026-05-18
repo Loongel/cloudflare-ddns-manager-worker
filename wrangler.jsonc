@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "cloudflare-ddns-manager-worker",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-05-16",
+  "workers_dev": true,
+  "kv_namespaces": [
+    {
+      "binding": "DDNS_TOKENS"
+    }
+  ],
+  "vars": {
+    "DDNS_DOMAIN_CONFIGS": "[{\"domain\":\"home.example.com\",\"zoneId\":\"replace-with-cloudflare-zone-id\",\"ttl\":120,\"proxied\":false}]",
+    "DEFAULT_TTL": "120",
+    "DEFAULT_PROXIED": "false"
+  },
+  "secrets": {
+    "required": [
+      "CF_API_TOKEN",
+      "DDNS_ADMIN_TOKEN",
+      "DDNS_TOKEN"
+    ]
+  }
+}

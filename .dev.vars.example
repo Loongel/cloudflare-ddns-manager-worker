@@ -1,0 +1,11 @@
+# Copy to .dev.vars for local wrangler dev. Do not commit real values.
+
+# Cloudflare API token used by the Worker to edit DNS records.
+# Recommended permission: Zone -> DNS -> Edit, scoped to the target zone only.
+CF_API_TOKEN=replace-with-zone-dns-edit-token
+
+# Manager admin token. Use this to sign in to the web manager and create scoped tokens.
+DDNS_ADMIN_TOKEN=replace-with-random-admin-token
+
+# Built-in scoped client token. Use this on one client, or create more in the web manager.
+DDNS_TOKEN=replace-with-random-scoped-token

@@ -3,6 +3,7 @@ node_modules/
 .dev.vars
 *.env
 *.env.*
+!*.env.example
 cf-ddns-depl*.env
 .deploy-result.env
 wrangler.toml

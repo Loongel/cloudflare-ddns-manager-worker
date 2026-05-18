@@ -1,164 +1,188 @@
 # Cloudflare DDNS Manager Worker
 
-Cloudflare Worker DDNS 服务，带网页管理器和轻量本地客户端。客户端只调用你自己的 Worker，不持有 Cloudflare API Token，适合家庭、办公室、边缘节点和 VPS 的动态公网 IP 更新。
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Loongel/cloudflare-ddns-manager-worker)
 
-## 功能
+Cloudflare Worker DDNS 管理器，内置 Web Manager、KV-backed scoped token registry 和 cron-friendly 本地客户端。客户端只调用你自己的 Worker，不持有 Cloudflare API Token，适合家庭宽带、办公室出口、边缘节点和 VPS 动态公网 IP 更新。
 
-- 固定更新接口：`/ddns/update`，兼容 `/update`。
-- 网页管理器：查看记录、创建客户端 Token、启用/禁用/删除 Token、删除 DNS 记录。
-- 两级 Token：Admin Token 管理全部记录；Scoped Token 只能管理自己创建的记录。
-- 支持多个 DDNS 后缀，例如 `home.example.com`、`lab.example.net`。
-- 未提交 IP 时，从 `CF-Connecting-IP` 自动识别客户端公网 IP。
-- 支持显式提交 IPv4/IPv6，更新 A/AAAA 记录。
-- 本地客户端可安装到当前用户 crontab，每 5 分钟自动更新。
-- 客户端会校验 endpoint 路径，HTML/非 JSON 响应不会刷屏。
+## Features
 
-## 文件结构
+- 固定 DDNS API：`/ddns/update`，兼容 `/update`。
+- Web Manager：查看记录、创建客户端 Token、启用/禁用/删除 Token、删除 DNS 记录。
+- 两级鉴权：Admin Token 管理全部记录；Scoped Token 只能管理自己创建的记录。
+- 多 DDNS 后缀：支持 `home.example.com`、`lab.example.net` 等多 Zone 配置。
+- 自动识别调用方公网 IP：未提交 IP 时读取 `CF-Connecting-IP`。
+- IPv4/IPv6：支持 A、AAAA、AUTO、BOTH 更新。
+- KV 记录归属：Token 和记录归属保存在 Cloudflare KV。
+- 本地客户端：可安装到当前用户 crontab，每 5 分钟自动更新。
+
+## Quick Start
+
+### 1. One-click deploy
+
+点击 README 顶部的 **Deploy to Cloudflare**，或打开：
 
 ```text
-src/worker.js              Cloudflare Worker 服务端
-scripts/ddns-client.sh     本地 DDNS 客户端和 cron 安装器
-scripts/deploy-and-test.sh 一键部署和真实链路测试脚本
-test/*.mjs                 Node 测试
-wrangler.toml.example      Wrangler 配置示例
-package.json               npm 脚本
+https://deploy.workers.cloudflare.com/?url=https://github.com/Loongel/cloudflare-ddns-manager-worker
 ```
 
-## 一键部署和测试
+Cloudflare 会基于仓库里的 `wrangler.jsonc` 创建 Worker，并自动 provision `DDNS_TOKENS` KV namespace。
 
-推荐先用脚本完成部署和端到端测试。脚本会运行本地测试、部署 Worker、调用 `/health`，再创建或更新一个测试 DNS 记录。
+部署时需要填写这些 secrets：
 
-创建本地 env 文件，不要提交：
+| Secret | 用途 |
+| --- | --- |
+| `CF_API_TOKEN` | Worker 调用 Cloudflare DNS API，建议只给目标 Zone 的 `DNS Edit` 权限 |
+| `DDNS_ADMIN_TOKEN` | Web Manager 管理员登录 Token，可管理全部记录和客户端 Token |
+| `DDNS_TOKEN` | 内置 Scoped Token，适合先给一台客户端使用 |
+
+生成 `DDNS_ADMIN_TOKEN` 和 `DDNS_TOKEN`：
 
 ```bash
-cat > cf-ddns-deploy.env <<'EOF'
-WORKER_NAME=cf-ddns
-MANAGE_ENDPOINT=ddns.example.com
-
-# 可 DDNS 的默认后缀；不写时默认使用 MANAGE_ENDPOINT。
-DDNS_DOMAIN=home.example.com
-
-# 简单模式：只配置一个可 DDNS 的后缀。
-CF_ZONE_ID=your-cloudflare-zone-id
-
-# 多后缀模式可改用完整服务端配置；设置后 CF_ZONE_ID 可省略。
-# DDNS_DOMAIN_CONFIGS=[{"domain":"home.example.com","zoneId":"zone-id-1","ttl":120,"proxied":false},{"domain":"lab.example.net","zoneId":"zone-id-2","ttl":120,"proxied":false}]
-
-# 可选：只在你明确要写入这个节点时填写。留空则只部署和健康检查，不写 DNS 记录。
-# TEST_HOST=your-node-name
-
-# Worker 运行时调用 Cloudflare DNS API 的 Secret，只放服务端。
-CF_API_TOKEN=your-zone-dns-edit-token
-
-# Admin token：可管理所有记录，并可在网页 Manager 中创建 scoped token。
-# 留空不写时部署脚本会自动生成并写入 Worker。
-# DDNS_ADMIN_TOKEN=your-admin-token
-
-# Scoped token：只能管理自己创建的记录，适合放到客户端机器。
-# 留空不写时部署脚本会自动生成并写入 Worker。
-# DDNS_TOKEN=your-scoped-token
-
-# Scoped token 和记录归属关系保存在 Cloudflare KV；留空时部署脚本会自动创建。
-# DDNS_TOKENS_KV_ID=your-kv-namespace-id
-
-# 非交互部署可选；没有这两项时脚本会尝试 wrangler login。
-CLOUDFLARE_ACCOUNT_ID=your-account-id
-CLOUDFLARE_API_TOKEN=your-workers-deploy-token
-EOF
-chmod 600 cf-ddns-deploy.env
+openssl rand -base64 32
 ```
 
-执行：
+### 2. Configure DDNS domains
 
-```bash
-npm run deploy:test
-```
+部署前或部署后，在 Worker 的 variables 中修改 `DDNS_DOMAIN_CONFIGS`。单域名示例：
 
-成功后脚本会输出一条可直接执行的客户端安装命令，形如：
-
-```bash
-./scripts/ddns-client.sh --install \
-  --manage-endpoint 'ddns.example.com' \
-  --ddns-token 'your-scoped-token' \
-  --sub-domain 'YOUR_NODE_NAME'
-```
-
-如果希望额外保存部署结果和客户端密钥，可以这样运行：
-
-```bash
-RESULT_FILE=.deploy-result.env npm run deploy:test
-```
-
-Token 权限建议：
-
-- `CF_API_TOKEN`：目标 Zone 的 `DNS Edit`，只给对应 Zone。
-- `CLOUDFLARE_API_TOKEN`：用于 Wrangler 部署 Worker 和创建 KV，至少需要当前 Account 的 Workers 脚本编辑权限和 KV 编辑权限。
-
-配置关系：
-
-- 客户端命令里的 `--ddns-token` 可以使用 Admin token 或 Scoped token。
-- Admin token 可管理所有记录，Scoped token 只能管理自己创建的记录。
-- 两类 token 不填时由部署脚本自动生成并写入 Worker；脚本会分别输出安装命令和用途说明。
-- 后续新增 Scoped token 可登录网页 Manager，用 Admin token 创建。
-- 可 DDNS 的域名后缀由 Worker 变量 `DDNS_DOMAIN_CONFIGS` 控制；增删域名后重新运行 `npm run deploy:test` 即可更新服务端配置。
-- 客户端只持有 `--ddns-token`，不持有 `CF_API_TOKEN`。
-- `TEST_HOST` 只用于部署后真实写入一条节点记录；没有明确节点名时不要设置它。
-
-## 网页管理器
-
-部署后访问 `https://MANAGE_ENDPOINT/` 可以打开网页管理器。
-
-Admin Token 登录后可以查看全部记录、管理客户端 Token、按需显示 Token 值、删除 DNS 记录。Scoped Token 登录后只能查看和管理该 Token 自己创建的记录。
-
-环境变量里的 Admin Token 和内置 Scoped Token 会显示在 Token 列表里，但不能在网页里禁用或删除；网页新建的 Scoped Token 支持启用、禁用和删除。
-
-## 手动 Worker 配置
-
-复制配置示例：
-
-```bash
-cp wrangler.toml.example wrangler.toml
-```
-
-编辑 `wrangler.toml` 里的 `DDNS_DOMAIN_CONFIGS`。推荐 JSON 格式：
-
-```toml
-[vars]
-DDNS_DOMAIN_CONFIGS = """
+```json
 [
   {
     "domain": "home.example.com",
     "zoneId": "your-cloudflare-zone-id",
     "ttl": 120,
     "proxied": false
+  }
+]
+```
+
+多域名 / 多 Zone 示例：
+
+```json
+[
+  {
+    "domain": "home.example.com",
+    "zoneId": "zone-id-1",
+    "ttl": 120,
+    "proxied": false
   },
   {
     "domain": "lab.example.net",
-    "zoneId": "another-zone-id",
+    "zoneId": "zone-id-2",
     "ttl": 120,
     "proxied": false
   }
 ]
-"""
-DEFAULT_TTL = "120"
-DEFAULT_PROXIED = "false"
 ```
 
 也支持 CSV 简写：
 
-```toml
-DDNS_DOMAIN_CONFIGS = "home.example.com:ZONE_ID,lab.example.net:ZONE_ID"
+```text
+home.example.com:ZONE_ID,lab.example.net:ZONE_ID
 ```
 
-设置 secret：
+### 3. Verify deployment
+
+访问健康检查：
+
+```text
+https://your-worker.workers.dev/health
+```
+
+访问 Web Manager：
+
+```text
+https://your-worker.workers.dev/
+```
+
+用 `DDNS_ADMIN_TOKEN` 登录后可以查看全部记录、创建新的 scoped token、管理 token 状态和删除 DNS 记录。用 scoped token 登录时，只能查看和管理该 token 自己创建的记录。
+
+## Configuration
+
+`wrangler.jsonc` 是一键部署入口使用的主配置。`wrangler.toml.example` 保留为手动部署参考。
+
+### Variables
+
+| Variable | 默认值 | 说明 |
+| --- | --- | --- |
+| `DDNS_DOMAIN_CONFIGS` | 示例 JSON | 允许更新的 DDNS 后缀和 Cloudflare Zone ID |
+| `DEFAULT_TTL` | `120` | DNS 记录默认 TTL |
+| `DEFAULT_PROXIED` | `false` | DNS 记录默认 Cloudflare proxy 状态 |
+
+### Secrets
+
+| Secret | 建议 |
+| --- | --- |
+| `CF_API_TOKEN` | Cloudflare API Token，权限只给目标 Zone 的 `Zone -> DNS -> Edit` |
+| `DDNS_ADMIN_TOKEN` | 自行生成的高强度随机字符串，不是 Cloudflare Token |
+| `DDNS_TOKEN` | 自行生成的 scoped client token，不是 Cloudflare Token |
+
+Cloudflare API Token 获取方式：
+
+1. 进入 Cloudflare Dashboard -> `My Profile` -> `API Tokens` -> `Create Token`。
+2. 使用 `Edit zone DNS` 模板，或自定义 Token。
+3. 权限至少包含 `Zone` -> `DNS` -> `Edit`。
+4. 资源范围建议只选择需要 DDNS 的具体 Zone。
+5. 将生成的 Token 写入 Worker secret `CF_API_TOKEN`。
+
+本地开发可以复制模板：
+
+```bash
+cp .dev.vars.example .dev.vars
+```
+
+然后填写真实 secret，再运行：
+
+```bash
+npm run dev
+```
+
+## Advanced Deploy
+
+如果你希望部署后自动跑本地测试、创建 KV、绑定自定义域名、健康检查，并可选真实写入一条测试 DNS 记录，使用现有脚本：
+
+```bash
+cp cf-ddns-deploy.env.example cf-ddns-deploy.env
+chmod 600 cf-ddns-deploy.env
+```
+
+编辑 `cf-ddns-deploy.env` 后运行：
+
+```bash
+npm run deploy:test
+```
+
+脚本会执行：
+
+- `npm test`
+- Wrangler 登录或使用 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`
+- 自动创建或复用 `DDNS_TOKENS` KV namespace
+- 部署 Worker
+- 调用 `/health`
+- 如果设置了 `TEST_HOST`，调用 `/ddns/update` 写入测试记录
+- 输出可直接使用的客户端安装命令
+
+保存部署结果和客户端密钥：
+
+```bash
+RESULT_FILE=.deploy-result.env npm run deploy:test
+```
+
+## Manual Deploy
+
+手动部署可以参考 `wrangler.toml.example`：
+
+```bash
+cp wrangler.toml.example wrangler.toml
+```
+
+编辑 `wrangler.toml` 中的 `DDNS_DOMAIN_CONFIGS` 和 `DDNS_TOKENS` KV namespace ID，然后写入 secrets：
 
 ```bash
 npx wrangler secret put CF_API_TOKEN
 npx wrangler secret put DDNS_ADMIN_TOKEN
 npx wrangler secret put DDNS_TOKEN
 ```
-
-手动部署还需要创建 KV namespace，并在 `wrangler.toml` 里绑定为 `DDNS_TOKENS`。
 
 部署：
 
@@ -167,80 +191,45 @@ npm install
 npm run deploy
 ```
 
-## Cloudflare API Token 获取方式
+不要提交真实 `wrangler.toml`、`.dev.vars`、`cf-ddns-deploy.env` 或任何 secret。
 
-在 Cloudflare Dashboard 中创建 API Token：
+## Client Installation
 
-1. 进入 `My Profile` -> `API Tokens` -> `Create Token`。
-2. 可使用 `Edit zone DNS` 模板，或自定义 Token。
-3. 权限至少包含 `Zone` -> `DNS` -> `Edit`。
-4. 资源范围建议只选择需要 DDNS 的具体 Zone。
-5. 保存生成的 Token，并通过 `npx wrangler secret put CF_API_TOKEN` 写入 Worker secret。
+推荐在客户端机器上使用 scoped token。客户端只保存 DDNS token，只访问你自己的 Worker，不保存 Cloudflare API Token。
 
-`DDNS_ADMIN_TOKEN` 和 `DDNS_TOKEN` 是你自己生成的客户端调用密钥，不是 Cloudflare Token。可以用下面命令生成：
-
-```bash
-openssl rand -base64 32
-```
-
-## 本地客户端使用
-
-首次安装到当前用户 crontab：
+安装到当前用户 crontab：
 
 ```bash
 ./scripts/ddns-client.sh --install \
-  --manage-endpoint ddns.example.com \
-  --ddns-token 'your-scoped-token'
-```
-
-上面的命令会默认使用本机短 hostname。例如主机名是 `nas`，最终会更新：
-
-```text
-nas.home.example.com
-```
-
-指定主机短名：
-
-```bash
-./scripts/ddns-client.sh --install \
-  --manage-endpoint ddns.example.com \
+  --manage-endpoint your-worker.workers.dev \
   --ddns-token 'your-scoped-token' \
-  --sub-domain router
+  --ddns-suffix home.example.com \
+  --sub-domain nas
 ```
 
-指定 IPv4 或 IPv6：
+如果 `--ddns-suffix` 和管理域名相同，可以省略。未指定 `--sub-domain` 时，客户端默认使用本机短 hostname。
+
+指定 IPv4：
 
 ```bash
 ./scripts/ddns-client.sh \
-  --manage-endpoint ddns.example.com \
+  --manage-endpoint your-worker.workers.dev \
   --ddns-token 'your-scoped-token' \
   --ddns-suffix home.example.com \
   --sub-domain router \
   --ipv4 203.0.113.10
 ```
 
+指定 IPv6：
+
 ```bash
 ./scripts/ddns-client.sh \
-  --manage-endpoint ddns.example.com \
+  --manage-endpoint your-worker.workers.dev \
   --ddns-token 'your-scoped-token' \
   --ddns-suffix home.example.com \
   --sub-domain router \
   --record-type AAAA \
   --ipv6 2001:db8::10
-```
-
-常见填写错误会在本地直接提示，例如 Manager endpoint 为空、子域名写成完整域名、记录类型非法、TTL 非正整数、IPv4/IPv6 格式明显错误等。旧参数 `--url`、`--token`、`--domain`、`--host` 仍然兼容。
-
-客户端配置写入：
-
-```text
-~/.config/cf-ddns-manager/client.env
-```
-
-日志写入：
-
-```text
-~/.cache/cf-ddns-manager/client.log
 ```
 
 卸载当前用户 crontab：
@@ -249,7 +238,19 @@ nas.home.example.com
 ./scripts/ddns-client.sh --uninstall
 ```
 
-查看客户端帮助：
+配置文件：
+
+```text
+~/.config/cf-ddns-manager/client.env
+```
+
+日志文件：
+
+```text
+~/.cache/cf-ddns-manager/client.log
+```
+
+查看帮助：
 
 ```bash
 ./scripts/ddns-client.sh --help
@@ -264,8 +265,6 @@ nas.home.example.com
 ```http
 Authorization: Bearer <DDNS_ADMIN_TOKEN 或 scoped token>
 ```
-
-这里的 Bearer token 可以是 `DDNS_ADMIN_TOKEN` 或某个 scoped token。
 
 参数：
 
@@ -283,7 +282,7 @@ Authorization: Bearer <DDNS_ADMIN_TOKEN 或 scoped token>
 
 ```bash
 curl --get 'https://your-worker.workers.dev/ddns/update' \
-  -H 'Authorization: Bearer your-ddns-secret' \
+  -H 'Authorization: Bearer your-ddns-token' \
   --data-urlencode 'domain=home.example.com' \
   --data-urlencode 'host=nas'
 ```
@@ -308,37 +307,47 @@ curl --get 'https://your-worker.workers.dev/ddns/update' \
 }
 ```
 
-## 本地测试
+## Development
 
-不需要真实 Cloudflare Token：
+安装依赖：
+
+```bash
+npm install
+```
+
+运行测试：
 
 ```bash
 npm test
 ```
 
-验证 Wrangler 打包但不上传：
+验证 Wrangler 打包但不上传。这里使用临时 secrets JSON，只用于 dry-run：
 
 ```bash
-cp wrangler.toml.example wrangler.toml
-npx wrangler deploy --dry-run
+printf '%s\n' '{"CF_API_TOKEN":"x","DDNS_ADMIN_TOKEN":"admin","DDNS_TOKEN":"scoped"}' > /tmp/cf-ddns-secrets.json
+npx wrangler deploy --dry-run --config wrangler.jsonc --secrets-file /tmp/cf-ddns-secrets.json
+rm -f /tmp/cf-ddns-secrets.json
 ```
 
 本地启动 Worker：
 
 ```bash
-cp wrangler.toml.example wrangler.toml
-npx wrangler dev
+cp .dev.vars.example .dev.vars
+npm run dev
 ```
 
-本地开发可以在 `.dev.vars` 放测试 secret：
+## Project Structure
 
 ```text
-CF_API_TOKEN=replace-with-token
-DDNS_ADMIN_TOKEN=replace-with-admin-token
-DDNS_TOKEN=replace-with-scoped-token
+src/worker.js              Cloudflare Worker 服务端
+scripts/ddns-client.sh     本地 DDNS 客户端和 cron 安装器
+scripts/deploy-and-test.sh 高级部署和真实链路测试脚本
+test/*.mjs                 Node 测试
+wrangler.jsonc             一键部署使用的 Worker 配置
+wrangler.toml.example      手动部署配置示例
+.dev.vars.example          本地开发 secret 模板
+cf-ddns-deploy.env.example 高级部署脚本 env 模板
 ```
-
-不要提交 `.dev.vars` 或真实 `wrangler.toml` secret。
 
 ## License
 
