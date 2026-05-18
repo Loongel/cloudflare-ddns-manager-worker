@@ -387,7 +387,7 @@ delete_remote_records() {
   for type in "${record_types[@]}"; do
     records_json+="${records_json:+,}{\"domain\":\"$(json_escape "$DOMAIN")\",\"host\":\"$(json_escape "$HOST")\",\"type\":\"${type}\"}"
   done
-  body="{\"records\":[${records_json}]}"
+  body="{\"records\":[${records_json}],\"ignoreMissing\":true,\"ignoreUnowned\":true}"
 
   body_file="$(mktemp)"
   meta_file="$(mktemp)"
@@ -409,6 +409,11 @@ delete_remote_records() {
   http_code="$(sed -n '1p' "$meta_file")"
   content_type="$(sed -n '2p' "$meta_file")"
   if [[ "$curl_status" -ne 0 || ! "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    if [[ "${http_code:-000}" == "403" ]] && grep -Eq '"record_not_owned"|record_not_owned|not owned by this DDNS token' "$body_file"; then
+      printf 'Remote DNS cleanup skipped: record is not owned by this DDNS token.\n'
+      rm -f "$body_file" "$meta_file" "$error_file"
+      return 0
+    fi
     print_endpoint_error "${http_code:-000}" "$content_type" "$body_file" "$(tr '\n' ' ' < "$error_file" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
   fi
   if [[ "$content_type" != *json* ]] && ! body_looks_like_json "$body_file"; then

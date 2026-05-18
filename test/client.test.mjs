@@ -261,6 +261,91 @@ printf '200\\napplication/json'
   assert.match(body, /"host":"nas"/);
   assert.match(body, /"type":"A"/);
   assert.match(body, /"type":"AAAA"/);
+  assert.match(body, /"ignoreMissing":true/);
+  assert.match(body, /"ignoreUnowned":true/);
+  assert.doesNotMatch(await readFile(join(home, "crontab.installed"), "utf8"), /cf-ddns-manager/);
+  await assert.rejects(stat(configPath), /ENOENT/);
+  await assert.rejects(stat(installedScript), /ENOENT/);
+});
+
+test("client uninstall treats unowned remote records as local cleanup success", async () => {
+  const home = await mkdtemp(join(tmpdir(), "cf-ddns-manager-"));
+  const fakeBin = join(home, "bin");
+  await mkdir(fakeBin, { recursive: true });
+
+  const fakeCrontab = join(fakeBin, "crontab");
+  await writeFile(
+    fakeCrontab,
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "-l" ]]; then
+  cat "\${HOME}/crontab.current" 2>/dev/null || exit 1
+else
+  cp "$1" "\${HOME}/crontab.installed"
+fi
+`,
+  );
+  await chmod(fakeCrontab, 0o755);
+
+  const fakeCurl = join(fakeBin, "curl");
+  await writeFile(
+    fakeCurl,
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+for ((i=1; i<=$#; i++)); do
+  if [[ "\${!i}" == "--output" ]]; then
+    j=$((i + 1))
+    out="\${!j}"
+  fi
+done
+printf '{"ok":false,"error":"record_not_owned","message":"nas.home.example.com AAAA is not owned by this DDNS token."}\\n' > "$out"
+printf '403\\napplication/json'
+`,
+  );
+  await chmod(fakeCurl, 0o755);
+
+  const configDir = join(home, ".config/cf-ddns-manager");
+  const appDir = join(home, ".local/share/cf-ddns-manager");
+  await mkdir(configDir, { recursive: true });
+  await mkdir(appDir, { recursive: true });
+  const configPath = join(configDir, "client.env");
+  const installedScript = join(appDir, "ddns-client.sh");
+  await writeFile(
+    configPath,
+    [
+      "URL=https://worker.example/ddns/update",
+      "TOKEN=client-secret",
+      "DOMAIN=home.example.com",
+      "HOST=nas",
+      "TYPE=AAAA",
+      "IPV4=",
+      "IPV6=",
+      "TTL=",
+      "PROXIED=",
+      "",
+    ].join("\n"),
+  );
+  await chmod(configPath, 0o600);
+  await writeFile(installedScript, "#!/usr/bin/env bash\n");
+  await chmod(installedScript, 0o700);
+  await writeFile(
+    join(home, "crontab.current"),
+    `*/5 * * * * ${installedScript} --config ${configPath} >> ${home}/.cache/cf-ddns-manager/client.log 2>&1 # cf-ddns-manager\n`,
+  );
+
+  const result = spawnSync("bash", [clientPath, "--uninstall"], {
+    cwd: resolve("."),
+    env: {
+      ...process.env,
+      HOME: home,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /Remote DNS cleanup skipped/);
   assert.doesNotMatch(await readFile(join(home, "crontab.installed"), "utf8"), /cf-ddns-manager/);
   await assert.rejects(stat(configPath), /ENOENT/);
   await assert.rejects(stat(installedScript), /ENOENT/);

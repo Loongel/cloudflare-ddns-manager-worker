@@ -262,6 +262,34 @@ test("manager can delete dns records by host without record id", async () => {
   }
 });
 
+test("scoped delete can skip unowned records during uninstall cleanup", async () => {
+  const kv = makeKv();
+  await kv.put(
+    "owner:A:nas.home.example.com",
+    JSON.stringify({ tokenId: "different-token", role: "scoped", updatedAt: new Date().toISOString() }),
+  );
+
+  const response = await worker.fetch(
+    new Request("https://worker.test/api/records", {
+      method: "DELETE",
+      headers: {
+        authorization: "Bearer scoped-secret",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        ignoreUnowned: true,
+        records: [{ domain: "home.example.com", type: "A", host: "nas" }],
+      }),
+    }),
+    { ...env, DDNS_TOKENS: kv },
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(body.deleted, []);
+  assert.equal(body.skipped[0].reason, "record_not_owned");
+});
+
 test("creates A record with inferred caller IPv4", async () => {
   const calls = [];
   const originalFetch = globalThis.fetch;

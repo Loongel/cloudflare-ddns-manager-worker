@@ -779,8 +779,11 @@ async function deleteScopedTokens(request, env, auth) {
 async function deleteDnsRecords(request, env, auth) {
   const input = await request.json().catch(() => ({}));
   const records = Array.isArray(input.records) ? input.records : [];
+  const ignoreMissing = Boolean(input.ignoreMissing);
+  const ignoreUnowned = Boolean(input.ignoreUnowned);
   const configs = parseDomainConfigs(env);
   const deleted = [];
+  const skipped = [];
 
   for (const item of records) {
     const type = normalizeRecordType(item.type);
@@ -796,6 +799,10 @@ async function deleteDnsRecords(request, env, auth) {
     if (auth.role !== "admin") {
       const owner = await getRecordOwner(env, type, name);
       if (owner?.tokenId !== auth.tokenId) {
+        if (ignoreUnowned) {
+          skipped.push({ type, name, reason: "record_not_owned" });
+          continue;
+        }
         throw httpError(403, "record_not_owned", `${name} ${type} is not owned by this DDNS token.`);
       }
     }
@@ -804,6 +811,9 @@ async function deleteDnsRecords(request, env, auth) {
       ? { id: String(item.id) }
       : await findCloudflareRecord(env, config.zoneId, type, name);
     if (!record?.id) {
+      if (ignoreMissing) {
+        skipped.push({ type, name, reason: "record_not_found" });
+      }
       continue;
     }
 
@@ -812,7 +822,7 @@ async function deleteDnsRecords(request, env, auth) {
     deleted.push({ id: record.id, type, name });
   }
 
-  return { ok: true, deleted };
+  return { ok: true, deleted, skipped };
 }
 
 async function listManagedTokens(env) {
