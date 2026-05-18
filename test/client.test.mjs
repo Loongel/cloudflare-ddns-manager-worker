@@ -670,6 +670,72 @@ fi
   assert.match(result.stdout, /"ok":true/);
 });
 
+test("client debug prints diagnostics without leaking token", async () => {
+  const home = await mkdtemp(join(tmpdir(), "cf-ddns-manager-"));
+  const fakeBin = join(home, "bin");
+  await mkdir(fakeBin, { recursive: true });
+
+  const fakeCurl = join(fakeBin, "curl");
+  await writeFile(
+    fakeCurl,
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+args="$*"
+if [[ "$args" == *"api.ipify.org"* ]]; then
+  printf '198.51.100.9'
+  exit 0
+fi
+if [[ "$args" == *"api6.ipify.org"* ]]; then
+  printf '2001:db8::9'
+  exit 0
+fi
+for ((i=1; i<=$#; i++)); do
+  if [[ "\${!i}" == "--output" ]]; then
+    j=$((i + 1))
+    out="\${!j}"
+  fi
+done
+printf '{"ok":true}\\n' > "$out"
+printf '200\\napplication/json'
+`,
+  );
+  await chmod(fakeCurl, 0o755);
+
+  const result = spawnSync(
+    "bash",
+    [
+      clientPath,
+      "--debug",
+      "--manage-endpoint",
+      "worker.example",
+      "--ddns-token",
+      "client-secret",
+      "--ddns-suffix",
+      "home.example.com",
+      "--sub-domain",
+      "nas",
+    ],
+    {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+      encoding: "utf8",
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stderr, /debug: endpoint=https:\/\/worker\.example\/ddns\/update/);
+  assert.match(result.stderr, /debug: detected ipv4=198\.51\.100\.9/);
+  assert.match(result.stderr, /debug: detected ipv6=2001:db8::9/);
+  assert.match(result.stderr, /debug: http_status=200/);
+  assert.match(result.stderr, /debug: token=\*\*\*REDACTED\*\*\*/);
+  assert.doesNotMatch(result.stderr, /client-secret/);
+});
+
 test("client rejects manage endpoint with wrong project path before calling curl", async () => {
   const home = await mkdtemp(join(tmpdir(), "cf-ddns-manager-"));
   const fakeBin = join(home, "bin");

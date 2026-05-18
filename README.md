@@ -298,6 +298,7 @@ npm run deploy
 | `--ipv4` / `--ipv6` | 显式指定 IP，跳过对应地址族的自动探测 |
 | `--ttl` | 覆盖 DNS TTL |
 | `--proxied` | 覆盖 Cloudflare proxy 开关 |
+| `--debug` | 打印 endpoint、IP 探测、HTTP 状态和响应摘要；不会打印 token |
 
 ## HTTP API
 

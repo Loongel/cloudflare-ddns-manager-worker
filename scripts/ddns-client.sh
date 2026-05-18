@@ -25,6 +25,7 @@ MODE="run"
 CONFIG_LOADED="false"
 EFFECTIVE_IPV4=""
 EFFECTIVE_IPV6=""
+DEBUG="false"
 
 usage() {
   cat <<'EOF'
@@ -51,6 +52,7 @@ Options:
   --config FILE         Load options from a config file.
   --install             Save config and install current user's crontab to run every 5 minutes.
   --uninstall           Delete this client's DNS record, crontab entry, config, and installed script.
+  --debug               Print endpoint, IP detection, and HTTP diagnostics. Token is redacted.
   -h, --help            Show this help.
 
 Backward-compatible aliases:
@@ -72,6 +74,11 @@ EOF
 die() {
   printf 'error: %s\n' "$*" >&2
   exit 1
+}
+
+debug_log() {
+  [[ "$DEBUG" == "true" ]] || return 0
+  printf 'debug: %s\n' "$*" >&2
 }
 
 need_value() {
@@ -149,10 +156,25 @@ detect_public_ip() {
   local family="$1"
   local url="$2"
   local candidate=""
+  debug_log "detecting public ${family} via ${url}"
   candidate="$(curl "--${family}" --silent --show-error --max-time "$CURL_CONNECT_TIMEOUT" "$url" 2>/dev/null | tr -d '[:space:]' || true)"
   case "$family" in
-    ipv4) is_ipv4 "$candidate" && printf '%s' "$candidate" ;;
-    ipv6) is_ipv6 "$candidate" && printf '%s' "$candidate" ;;
+    ipv4)
+      if is_ipv4 "$candidate"; then
+        debug_log "detected ipv4=${candidate}"
+        printf '%s' "$candidate"
+      else
+        debug_log "no valid ipv4 detected"
+      fi
+      ;;
+    ipv6)
+      if is_ipv6 "$candidate"; then
+        debug_log "detected ipv6=${candidate}"
+        printf '%s' "$candidate"
+      else
+        debug_log "no valid ipv6 detected"
+      fi
+      ;;
   esac
   return 0
 }
@@ -288,6 +310,10 @@ while [[ $# -gt 0 ]]; do
       MODE="uninstall"
       shift
       ;;
+    --debug)
+      DEBUG="true"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -329,6 +355,12 @@ validate_required() {
   fi
   [[ -z "$PROXIED" || "${PROXIED,,}" =~ ^(true|false|1|0|yes|no|on|off)$ ]] ||
     die "--proxied must be true or false"
+  debug_log "mode=${MODE}"
+  debug_log "endpoint=${URL}"
+  debug_log "domain=${DOMAIN}"
+  debug_log "host=${HOST}"
+  debug_log "record_type=${TYPE}"
+  debug_log "token=***REDACTED***"
 }
 
 shell_quote() {
@@ -480,6 +512,8 @@ remove_local_files() {
 run_update() {
   validate_required
   fill_effective_ips
+  debug_log "effective_ipv4=${EFFECTIVE_IPV4:-<none>}"
+  debug_log "effective_ipv6=${EFFECTIVE_IPV6:-<none>}"
 
   local body_file meta_file error_file curl_status http_code content_type retry_ipv4
   body_file="$(mktemp)"
@@ -504,6 +538,8 @@ run_update() {
   [[ -z "$TTL" ]] || args+=(--data-urlencode "ttl=${TTL}")
   [[ -z "$PROXIED" ]] || args+=(--data-urlencode "proxied=${PROXIED}")
 
+  debug_log "request_url=${URL}"
+  debug_log "request_force_ipv4=false"
   if curl "${args[@]}" "$URL" > "$meta_file" 2> "$error_file"; then
     curl_status=0
   else
@@ -512,6 +548,9 @@ run_update() {
 
   http_code="$(sed -n '1p' "$meta_file")"
   content_type="$(sed -n '2p' "$meta_file")"
+  debug_log "http_status=${http_code:-000}"
+  debug_log "content_type=${content_type:-<none>}"
+  debug_log "body_excerpt=$(print_body_excerpt "$body_file")"
   retry_ipv4="false"
   if should_retry_ipv4 "${http_code:-000}" "$body_file"; then
     retry_ipv4="true"
@@ -520,6 +559,8 @@ run_update() {
     : > "$body_file"
     : > "$meta_file"
     : > "$error_file"
+    debug_log "retrying update over IPv4 because the first response was HTML HTTP 403"
+    debug_log "request_force_ipv4=true"
     if curl --ipv4 "${args[@]}" "$URL" > "$meta_file" 2> "$error_file"; then
       curl_status=0
     else
@@ -527,6 +568,9 @@ run_update() {
     fi
     http_code="$(sed -n '1p' "$meta_file")"
     content_type="$(sed -n '2p' "$meta_file")"
+    debug_log "retry_http_status=${http_code:-000}"
+    debug_log "retry_content_type=${content_type:-<none>}"
+    debug_log "retry_body_excerpt=$(print_body_excerpt "$body_file")"
   fi
   if [[ "$curl_status" -ne 0 ]]; then
     print_endpoint_error "${http_code:-000}" "$content_type" "$body_file" "$(tr '\n' ' ' < "$error_file" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
