@@ -133,6 +133,7 @@ curl -fsSL \
     --install \
     --manage-endpoint your-worker.workers.dev \
     --ddns-token 'your-scoped-token' \
+    --user-agent 'cf-ddns-manager-client/your-private-tag' \
     --ddns-suffix home.example.com \
     --sub-domain nas
 ```
@@ -150,6 +151,10 @@ curl -fsSL \
 探测到的地址只用于当次更新，不会固化写入 `client.env`。
 
 重复执行安装命令是安全的：配置会覆盖写入，crontab 中旧的 `# cf-ddns-manager` 条目会先移除再写入新条目。
+
+`--user-agent` 会写入客户端配置，之后所有到 Manager Worker 的 DDNS 请求都会带上这个值。
+它适合在 Cloudflare WAF / Bot 防护里做放行识别；它不是认证手段，真正认证仍然依赖 Bearer token。
+如果不传，默认值是 `cf-ddns-manager-client/1.0`。
 
 卸载：
 
@@ -199,6 +204,48 @@ cp .dev.vars.example .dev.vars
 npm run dev
 ```
 
+## Cloudflare Security Rules
+
+如果 `curl` 客户端请求被 Cloudflare 返回 `Just a moment...`、HTML 403 或 Bot/WAF challenge，可以给 DDNS API 加一条 WAF Skip 规则。
+Cloudflare 官方参考： [Skip action](https://developers.cloudflare.com/waf/custom-rules/skip/) / [Skip options](https://developers.cloudflare.com/waf/custom-rules/skip/options/)。
+
+推荐先生成一个只给本项目使用的 User-Agent 标签：
+
+```bash
+printf 'cf-ddns-manager-client/%s\n' "$(openssl rand -hex 12)"
+```
+
+然后安装客户端时指定：
+
+```bash
+--user-agent 'cf-ddns-manager-client/你的随机标签'
+```
+
+Cloudflare Dashboard 设置步骤：
+
+1. 进入目标 Zone。
+2. 打开 `Security` -> `WAF` -> `Custom rules`。
+3. 新建规则，例如 `Allow DDNS Worker client`。
+4. 使用表达式，替换域名和 User-Agent：
+
+```text
+(http.host eq "ddns.example.com" and http.user_agent eq "cf-ddns-manager-client/你的随机标签" and http.request.uri.path in {"/ddns/update" "/update" "/api/records" "/health"})
+```
+
+5. Action 选择 `Skip`。
+6. Skip scope 勾选会影响 curl/API 的规则，例如 WAF Managed Rules、Rate Limiting Rules、Super Bot Fight Mode Rules。
+7. 保存后在客户端运行 `--debug`，确认返回 `content_type=application/json`。
+
+如果这个域名只给 DDNS Worker 使用，也可以把表达式简化为：
+
+```text
+(http.host eq "ddns.example.com" and http.user_agent eq "cf-ddns-manager-client/你的随机标签")
+```
+
+注意：Cloudflare Bot Fight Mode 不能通过 WAF custom rule 跳过；如果是它触发拦截，需要关闭 Bot Fight Mode、改用可配置 Skip 的 Super Bot Fight Mode，或用 Cloudflare 支持的 IP Access rule 先命中放行。
+
+User-Agent 可以被伪造，所以不要把它当作密钥；Worker 的 `Authorization: Bearer ...` 仍然必须保留。
+
 ## Advanced Deploy
 
 如果你希望部署后自动跑本地测试、创建 KV、绑定自定义域名、健康检查，并可选真实写入一条测试 DNS 记录，使用现有脚本：
@@ -213,6 +260,8 @@ chmod 600 cf-ddns-deploy.env
 ```bash
 npm run deploy:test
 ```
+
+`cf-ddns-deploy.env` 里的 `DDNS_USER_AGENT` 会用于部署后的健康检查、真实链路测试，以及脚本输出的客户端安装命令。
 
 脚本会执行：
 
@@ -298,6 +347,7 @@ npm run deploy
 | `--ipv4` / `--ipv6` | 显式指定 IP，跳过对应地址族的自动探测 |
 | `--ttl` | 覆盖 DNS TTL |
 | `--proxied` | 覆盖 Cloudflare proxy 开关 |
+| `--user-agent` | 发往 Manager Worker 的 User-Agent，可用于 Cloudflare WAF 放行 |
 | `--debug` | 打印 endpoint、IP 探测、HTTP 状态和响应摘要；不会打印 token |
 
 ## HTTP API
@@ -326,6 +376,7 @@ Authorization: Bearer <DDNS_ADMIN_TOKEN 或 scoped token>
 
 ```bash
 curl --get 'https://your-worker.workers.dev/ddns/update' \
+  --user-agent 'cf-ddns-manager-client/your-private-tag' \
   -H 'Authorization: Bearer your-ddns-token' \
   --data-urlencode 'domain=home.example.com' \
   --data-urlencode 'host=nas'

@@ -77,6 +77,7 @@ printf '200\\napplication/json'
   assert.match(config, /^TOKEN=client-secret$/m);
   assert.match(config, /^DOMAIN=home\.example\.com$/m);
   assert.match(config, /^HOST=nas$/m);
+  assert.match(config, /^DDNS_USER_AGENT=cf-ddns-manager-client\/1\.0$/m);
   assert.equal((await stat(configPath)).mode & 0o777, 0o600);
 
   const cron = await readFile(join(home, "crontab.installed"), "utf8");
@@ -337,6 +338,7 @@ printf '200\\napplication/json'
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(await readFile(join(home, "curl.args"), "utf8"), /--request DELETE/);
+  assert.match(await readFile(join(home, "curl.args"), "utf8"), /User-Agent: cf-ddns-manager-client\/1\.0/);
   assert.match(await readFile(join(home, "curl.args"), "utf8"), /https:\/\/worker\.example\/api\/records/);
   const body = await readFile(join(home, "delete.body"), "utf8");
   assert.match(body, /"host":"nas"/);
@@ -517,6 +519,81 @@ printf '200\\napplication/json'
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /domain=ddns\.example\.com/);
+});
+
+test("client sends and persists custom user agent", async () => {
+  const home = await mkdtemp(join(tmpdir(), "cf-ddns-manager-"));
+  const fakeBin = join(home, "bin");
+  await mkdir(fakeBin, { recursive: true });
+
+  const fakeCrontab = join(fakeBin, "crontab");
+  await writeFile(
+    fakeCrontab,
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "-l" ]]; then
+  cat "\${HOME}/crontab.current" 2>/dev/null || exit 1
+else
+  cp "$1" "\${HOME}/crontab.installed"
+fi
+`,
+  );
+  await chmod(fakeCrontab, 0o755);
+
+  const fakeCurl = join(fakeBin, "curl");
+  await writeFile(
+    fakeCurl,
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+args="$*"
+if [[ "$args" == *"api.ipify.org"* || "$args" == *"api6.ipify.org"* ]]; then
+  exit 0
+fi
+for ((i=1; i<=$#; i++)); do
+  if [[ "\${!i}" == "--output" ]]; then
+    j=$((i + 1))
+    out="\${!j}"
+  fi
+done
+printf '%s\\n' "$args" > "\${HOME}/update.args"
+printf '{"ok":true}\\n' > "$out"
+printf '200\\napplication/json'
+`,
+  );
+  await chmod(fakeCurl, 0o755);
+
+  const result = spawnSync(
+    "bash",
+    [
+      clientPath,
+      "--install",
+      "--manage-endpoint",
+      "worker.example",
+      "--ddns-token",
+      "client-secret",
+      "--user-agent",
+      "cf-ddns-manager-client/custom-tag",
+      "--ddns-suffix",
+      "home.example.com",
+      "--sub-domain",
+      "nas",
+    ],
+    {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+      encoding: "utf8",
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(await readFile(join(home, "update.args"), "utf8"), /--user-agent cf-ddns-manager-client\/custom-tag/);
+  const config = await readFile(join(home, ".config/cf-ddns-manager/client.env"), "utf8");
+  assert.match(config, /^DDNS_USER_AGENT=cf-ddns-manager-client\/custom-tag$/m);
 });
 
 test("client auto-detects both public IP families without persisting detected values", async () => {
@@ -731,6 +808,7 @@ printf '200\\napplication/json'
   assert.match(result.stderr, /debug: endpoint=https:\/\/worker\.example\/ddns\/update/);
   assert.match(result.stderr, /debug: detected ipv4=198\.51\.100\.9/);
   assert.match(result.stderr, /debug: detected ipv6=2001:db8::9/);
+  assert.match(result.stderr, /debug: user_agent=cf-ddns-manager-client\/1\.0/);
   assert.match(result.stderr, /debug: http_status=200/);
   assert.match(result.stderr, /debug: token=\*\*\*REDACTED\*\*\*/);
   assert.doesNotMatch(result.stderr, /client-secret/);

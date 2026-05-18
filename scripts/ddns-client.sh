@@ -11,6 +11,7 @@ CLIENT_SCRIPT_URL="${CLIENT_SCRIPT_URL:-https://raw.githubusercontent.com/Loonge
 IPV4_LOOKUP_URL="${IPV4_LOOKUP_URL:-https://api.ipify.org}"
 IPV6_LOOKUP_URL="${IPV6_LOOKUP_URL:-https://api6.ipify.org}"
 CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-8}"
+DDNS_USER_AGENT="${DDNS_USER_AGENT:-cf-ddns-manager-client/1.0}"
 
 URL=""
 TOKEN=""
@@ -49,6 +50,8 @@ Options:
   --ipv6 IP             Explicit IPv6 address. If omitted, the client tries curl -6 detection.
   --ttl SECONDS         Override DNS record TTL.
   --proxied BOOL        Override Cloudflare proxy setting: true or false.
+  --user-agent VALUE    User-Agent sent to the Manager Worker.
+                        Defaults to cf-ddns-manager-client/1.0.
   --config FILE         Load options from a config file.
   --install             Save config and install current user's crontab to run every 5 minutes.
   --uninstall           Delete this client's DNS record, crontab entry, config, and installed script.
@@ -295,6 +298,11 @@ while [[ $# -gt 0 ]]; do
       PROXIED="$2"
       shift 2
       ;;
+    --user-agent)
+      need_value "$1" "${2:-}"
+      DDNS_USER_AGENT="$2"
+      shift 2
+      ;;
     --config)
       need_value "$1" "${2:-}"
       # shellcheck source=/dev/null
@@ -355,11 +363,14 @@ validate_required() {
   fi
   [[ -z "$PROXIED" || "${PROXIED,,}" =~ ^(true|false|1|0|yes|no|on|off)$ ]] ||
     die "--proxied must be true or false"
+  [[ -n "$DDNS_USER_AGENT" && "$DDNS_USER_AGENT" != *$'\n'* && "$DDNS_USER_AGENT" != *$'\r'* ]] ||
+    die "--user-agent cannot be empty or contain newlines"
   debug_log "mode=${MODE}"
   debug_log "endpoint=${URL}"
   debug_log "domain=${DOMAIN}"
   debug_log "host=${HOST}"
   debug_log "record_type=${TYPE}"
+  debug_log "user_agent=${DDNS_USER_AGENT}"
   debug_log "token=***REDACTED***"
 }
 
@@ -388,6 +399,7 @@ write_config() {
     printf 'IPV6=%s\n' "$(shell_quote "$IPV6")"
     printf 'TTL=%s\n' "$(shell_quote "$TTL")"
     printf 'PROXIED=%s\n' "$(shell_quote "$PROXIED")"
+    printf 'DDNS_USER_AGENT=%s\n' "$(shell_quote "$DDNS_USER_AGENT")"
   } > "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE"
 }
@@ -476,6 +488,7 @@ delete_remote_records() {
     --output "$body_file" \
     --write-out "%{http_code}\n%{content_type}" \
     --header "Authorization: Bearer ${TOKEN}" \
+    --header "User-Agent: ${DDNS_USER_AGENT}" \
     --header "content-type: application/json" \
     --data "$body" \
     "${api_root}/api/records" > "$meta_file" 2> "$error_file"; then
@@ -527,6 +540,7 @@ run_update() {
     --get
     --output "$body_file"
     --write-out "%{http_code}\n%{content_type}"
+    --user-agent "${DDNS_USER_AGENT}"
     --header "Authorization: Bearer ${TOKEN}"
     --data-urlencode "domain=${DOMAIN}"
     --data-urlencode "host=${HOST}"

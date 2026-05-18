@@ -6,6 +6,7 @@ WORKER_SCRIPT="${ROOT_DIR}/src/worker.js"
 COMPATIBILITY_DATE="${COMPATIBILITY_DATE:-2026-05-16}"
 DEFAULT_TTL="${DEFAULT_TTL:-120}"
 DEFAULT_PROXIED="${DEFAULT_PROXIED:-false}"
+DDNS_USER_AGENT="${DDNS_USER_AGENT:-cf-ddns-manager-client/1.0}"
 
 WORKER_NAME="${WORKER_NAME:-}"
 DDNS_DOMAIN="${DDNS_DOMAIN:-}"
@@ -56,7 +57,7 @@ load_env_file() {
     fi
 
     case "$key" in
-      WORKER_NAME|DDNS_DOMAIN|DDNS_DOMAIN_CONFIGS|MANAGE_ENDPOINT|CF_ZONE_ID|TEST_HOST|CF_API_TOKEN|DDNS_ADMIN_TOKEN|DDNS_TOKEN|DDNS_SECRET|DDNS_TOKENS_KV_ID|WORKER_URL|CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID|COMPATIBILITY_DATE|DEFAULT_TTL|DEFAULT_PROXIED)
+      WORKER_NAME|DDNS_DOMAIN|DDNS_DOMAIN_CONFIGS|MANAGE_ENDPOINT|CF_ZONE_ID|TEST_HOST|CF_API_TOKEN|DDNS_ADMIN_TOKEN|DDNS_TOKEN|DDNS_SECRET|DDNS_TOKENS_KV_ID|WORKER_URL|CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID|COMPATIBILITY_DATE|DEFAULT_TTL|DEFAULT_PROXIED|DDNS_USER_AGENT)
         printf -v "$key" '%s' "$value"
         export "$key"
         ;;
@@ -231,6 +232,8 @@ validate_inputs() {
     die "DEFAULT_TTL must be a positive integer"
   DEFAULT_PROXIED="$(normalize_bool "$DEFAULT_PROXIED")" ||
     die "DEFAULT_PROXIED must be true or false"
+  [[ -n "$DDNS_USER_AGENT" && "$DDNS_USER_AGENT" != *$'\n'* && "$DDNS_USER_AGENT" != *$'\r'* ]] ||
+    die "DDNS_USER_AGENT cannot be empty or contain newlines"
 }
 
 generate_ddns_secret() {
@@ -292,13 +295,14 @@ parse_worker_url() {
 
 run_health_check() {
   info "Checking Worker health"
-  curl_json_or_die "Worker health check" "${WORKER_URL}/health"
+  curl_json_or_die "Worker health check" --user-agent "$DDNS_USER_AGENT" "${WORKER_URL}/health"
   printf '\n'
 }
 
 run_ddns_check() {
   info "Updating ${TEST_HOST}.${DDNS_DOMAIN}"
   curl_json_or_die "DDNS update check" --get \
+    --user-agent "$DDNS_USER_AGENT" \
     --header "Authorization: Bearer ${DDNS_SECRET}" \
     --data-urlencode "domain=${DDNS_DOMAIN}" \
     --data-urlencode "host=${TEST_HOST}" \
@@ -383,6 +387,7 @@ write_result_file() {
     printf 'DDNS_ADMIN_TOKEN=%s\n' "$(shell_quote "$DDNS_ADMIN_TOKEN")"
     printf 'DDNS_TOKEN=%s\n' "$(shell_quote "$DDNS_TOKEN")"
     printf 'DDNS_DOMAIN=%s\n' "$(shell_quote "$DDNS_DOMAIN")"
+    printf 'DDNS_USER_AGENT=%s\n' "$(shell_quote "$DDNS_USER_AGENT")"
     printf 'TEST_HOST=%s\n' "$(shell_quote "$TEST_HOST")"
   } > "$RESULT_FILE"
 }
@@ -477,6 +482,7 @@ main() {
   printf './scripts/ddns-client.sh --install \\\n'
   printf '  --manage-endpoint %s \\\n' "$(shell_quote "$manager_host")"
   printf '  --ddns-token %s \\\n' "$(shell_quote "$DDNS_ADMIN_TOKEN")"
+  printf '  --user-agent %s \\\n' "$(shell_quote "$DDNS_USER_AGENT")"
   if [[ ${#suffix_args[@]} -gt 0 ]]; then
     printf '  %s %s \\\n' "${suffix_args[0]}" "${suffix_args[1]}"
   fi
@@ -485,6 +491,7 @@ main() {
   printf './scripts/ddns-client.sh --install \\\n'
   printf '  --manage-endpoint %s \\\n' "$(shell_quote "$manager_host")"
   printf '  --ddns-token %s \\\n' "$(shell_quote "$DDNS_TOKEN")"
+  printf '  --user-agent %s \\\n' "$(shell_quote "$DDNS_USER_AGENT")"
   if [[ ${#suffix_args[@]} -gt 0 ]]; then
     printf '  %s %s \\\n' "${suffix_args[0]}" "${suffix_args[1]}"
   fi
