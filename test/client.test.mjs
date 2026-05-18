@@ -80,8 +80,190 @@ printf '200\\napplication/json'
   assert.equal((await stat(configPath)).mode & 0o777, 0o600);
 
   const cron = await readFile(join(home, "crontab.installed"), "utf8");
-  assert.match(cron, /^\*\/5 \* \* \* \* .*ddns-client\.sh --config .*client\.env >> .*client\.log 2>&1 # cf-ddns-manager$/m);
+  assert.match(
+    cron,
+    new RegExp(`^\\*/5 \\* \\* \\* \\* ${home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/\\.local/share/cf-ddns-manager/ddns-client\\.sh --config .*client\\.env >> .*client\\.log 2>&1 # cf-ddns-manager$`, "m"),
+  );
   assert.doesNotMatch(cron, /client-secret/);
+
+  const installedScript = join(home, ".local/share/cf-ddns-manager/ddns-client.sh");
+  assert.equal((await stat(installedScript)).mode & 0o777, 0o700);
+});
+
+test("online piped install persists script before writing crontab", async () => {
+  const home = await mkdtemp(join(tmpdir(), "cf-ddns-manager-"));
+  const fakeBin = join(home, "bin");
+  await mkdir(fakeBin, { recursive: true });
+
+  const fakeCrontab = join(fakeBin, "crontab");
+  await writeFile(
+    fakeCrontab,
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "-l" ]]; then
+  cat "\${HOME}/crontab.current" 2>/dev/null || exit 1
+else
+  cp "$1" "\${HOME}/crontab.installed"
+fi
+`,
+  );
+  await chmod(fakeCrontab, 0o755);
+
+  const fakeCurl = join(fakeBin, "curl");
+  await writeFile(
+    fakeCurl,
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+for ((i=1; i<=$#; i++)); do
+  if [[ "\${!i}" == "--output" ]]; then
+    j=$((i + 1))
+    out="\${!j}"
+  fi
+done
+if [[ -n "$out" ]]; then
+  printf '{"ok":true}\\n' > "$out"
+  printf '200\\napplication/json'
+else
+  cat "$SCRIPT_FIXTURE"
+fi
+`,
+  );
+  await chmod(fakeCurl, 0o755);
+
+  const script = await readFile(clientPath, "utf8");
+  const result = spawnSync(
+    "bash",
+    [
+      "-s",
+      "--",
+      "--install",
+      "--manage-endpoint",
+      "worker.example",
+      "--ddns-token",
+      "client-secret",
+      "--ddns-suffix",
+      "home.example.com",
+      "--sub-domain",
+      "nas",
+    ],
+    {
+      cwd: home,
+      input: script,
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        SCRIPT_FIXTURE: clientPath,
+      },
+      encoding: "utf8",
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+
+  const installedScript = join(home, ".local/share/cf-ddns-manager/ddns-client.sh");
+  assert.equal((await stat(installedScript)).mode & 0o777, 0o700);
+  const cron = await readFile(join(home, "crontab.installed"), "utf8");
+  assert.match(cron, /\/\.local\/share\/cf-ddns-manager\/ddns-client\.sh --config /);
+  assert.doesNotMatch(cron, new RegExp(`${home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/ddns-client\\.sh`));
+});
+
+test("client uninstall deletes remote records and local install", async () => {
+  const home = await mkdtemp(join(tmpdir(), "cf-ddns-manager-"));
+  const fakeBin = join(home, "bin");
+  await mkdir(fakeBin, { recursive: true });
+
+  const fakeCrontab = join(fakeBin, "crontab");
+  await writeFile(
+    fakeCrontab,
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "-l" ]]; then
+  cat "\${HOME}/crontab.current" 2>/dev/null || exit 1
+else
+  cp "$1" "\${HOME}/crontab.installed"
+fi
+`,
+  );
+  await chmod(fakeCrontab, 0o755);
+
+  const fakeCurl = join(fakeBin, "curl");
+  await writeFile(
+    fakeCurl,
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+data=""
+for ((i=1; i<=$#; i++)); do
+  case "\${!i}" in
+    --output)
+      j=$((i + 1))
+      out="\${!j}"
+      ;;
+    --data)
+      j=$((i + 1))
+      data="\${!j}"
+      ;;
+  esac
+done
+printf '%s\\n' "$*" > "\${HOME}/curl.args"
+printf '%s\\n' "$data" > "\${HOME}/delete.body"
+printf '{"ok":true,"deleted":[{"id":"record-a"},{"id":"record-aaaa"}]}\\n' > "$out"
+printf '200\\napplication/json'
+`,
+  );
+  await chmod(fakeCurl, 0o755);
+
+  const configDir = join(home, ".config/cf-ddns-manager");
+  const appDir = join(home, ".local/share/cf-ddns-manager");
+  await mkdir(configDir, { recursive: true });
+  await mkdir(appDir, { recursive: true });
+  const configPath = join(configDir, "client.env");
+  const installedScript = join(appDir, "ddns-client.sh");
+  await writeFile(
+    configPath,
+    [
+      "URL=https://worker.example/ddns/update",
+      "TOKEN=client-secret",
+      "DOMAIN=home.example.com",
+      "HOST=nas",
+      "TYPE=BOTH",
+      "IPV4=",
+      "IPV6=",
+      "TTL=",
+      "PROXIED=",
+      "",
+    ].join("\n"),
+  );
+  await chmod(configPath, 0o600);
+  await writeFile(installedScript, "#!/usr/bin/env bash\n");
+  await chmod(installedScript, 0o700);
+  await writeFile(
+    join(home, "crontab.current"),
+    `*/5 * * * * ${installedScript} --config ${configPath} >> ${home}/.cache/cf-ddns-manager/client.log 2>&1 # cf-ddns-manager\n`,
+  );
+
+  const result = spawnSync("bash", [clientPath, "--uninstall"], {
+    cwd: resolve("."),
+    env: {
+      ...process.env,
+      HOME: home,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(await readFile(join(home, "curl.args"), "utf8"), /--request DELETE/);
+  assert.match(await readFile(join(home, "curl.args"), "utf8"), /https:\/\/worker\.example\/api\/records/);
+  const body = await readFile(join(home, "delete.body"), "utf8");
+  assert.match(body, /"host":"nas"/);
+  assert.match(body, /"type":"A"/);
+  assert.match(body, /"type":"AAAA"/);
+  assert.doesNotMatch(await readFile(join(home, "crontab.installed"), "utf8"), /cf-ddns-manager/);
+  await assert.rejects(stat(configPath), /ENOENT/);
+  await assert.rejects(stat(installedScript), /ENOENT/);
 });
 
 test("client explains common argument mistakes before calling curl", async () => {

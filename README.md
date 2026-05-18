@@ -209,6 +209,14 @@ npm run deploy
 curl -fsSL https://raw.githubusercontent.com/Loongel/cloudflare-ddns-manager-worker/main/scripts/ddns-client.sh | bash -s -- --install --manage-endpoint your-worker.workers.dev --ddns-token 'your-scoped-token' --ddns-suffix home.example.com --sub-domain nas
 ```
 
+安装脚本会把客户端固定保存到：
+
+```text
+~/.local/share/cf-ddns-manager/ddns-client.sh
+```
+
+crontab 会引用这个固定路径，不会引用你执行命令时的当前目录或临时脚本路径。
+
 安装到当前用户 crontab：
 
 ```bash
@@ -249,6 +257,8 @@ curl -fsSL https://raw.githubusercontent.com/Loongel/cloudflare-ddns-manager-wor
 ```bash
 ./scripts/ddns-client.sh --uninstall
 ```
+
+卸载会读取本地配置，先请求 Worker 删除当前客户端对应的 DNS 记录，再移除 crontab、客户端配置和 `~/.local/share/cf-ddns-manager/ddns-client.sh`。如果远端删除失败，脚本会提示 warning，但仍会继续清理本地安装。
 
 配置文件：
 

@@ -4,7 +4,10 @@ set -euo pipefail
 APP_NAME="cf-ddns-manager"
 CRON_TAG="# ${APP_NAME}"
 CONFIG_FILE="${HOME}/.config/${APP_NAME}/client.env"
+APP_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/${APP_NAME}"
+INSTALL_SCRIPT="${APP_DIR}/ddns-client.sh"
 LOG_FILE="${HOME}/.cache/${APP_NAME}/client.log"
+CLIENT_SCRIPT_URL="${CLIENT_SCRIPT_URL:-https://raw.githubusercontent.com/Loongel/cloudflare-ddns-manager-worker/main/scripts/ddns-client.sh}"
 
 URL=""
 TOKEN=""
@@ -16,6 +19,7 @@ IPV6=""
 TTL=""
 PROXIED=""
 MODE="run"
+CONFIG_LOADED="false"
 
 usage() {
   cat <<'EOF'
@@ -41,7 +45,7 @@ Options:
   --proxied BOOL        Override Cloudflare proxy setting: true or false.
   --config FILE         Load options from a config file.
   --install             Save config and install current user's crontab to run every 5 minutes.
-  --uninstall           Remove this client's crontab entry for current user.
+  --uninstall           Delete this client's DNS record, crontab entry, config, and installed script.
   -h, --help            Show this help.
 
 Backward-compatible aliases:
@@ -233,6 +237,7 @@ while [[ $# -gt 0 ]]; do
       need_value "$1" "${2:-}"
       # shellcheck source=/dev/null
       source "$2"
+      CONFIG_LOADED="true"
       shift 2
       ;;
     --install)
@@ -252,6 +257,12 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$MODE" == "uninstall" && "$CONFIG_LOADED" != "true" && -f "$CONFIG_FILE" ]]; then
+  # shellcheck source=/dev/null
+  source "$CONFIG_FILE"
+  CONFIG_LOADED="true"
+fi
 
 HOST="${HOST:-$(hostname -s 2>/dev/null || hostname)}"
 
@@ -284,6 +295,14 @@ shell_quote() {
   printf '%q' "$1"
 }
 
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  printf '%s' "$value"
+}
+
 write_config() {
   mkdir -p "$(dirname "$CONFIG_FILE")"
   chmod 700 "$(dirname "$CONFIG_FILE")"
@@ -301,12 +320,28 @@ write_config() {
   chmod 600 "$CONFIG_FILE"
 }
 
+install_script_file() {
+  mkdir -p "$APP_DIR"
+  chmod 700 "$APP_DIR"
+
+  local current_script="${BASH_SOURCE[0]}"
+  if [[ -f "$current_script" && -r "$current_script" ]]; then
+    local current_abs install_abs
+    current_abs="$(cd "$(dirname "$current_script")" && pwd)/$(basename "$current_script")"
+    install_abs="$(cd "$APP_DIR" && pwd)/$(basename "$INSTALL_SCRIPT")"
+    if [[ "$current_abs" != "$install_abs" ]]; then
+      cp "$current_abs" "$INSTALL_SCRIPT"
+    fi
+  else
+    curl -fsSL "$CLIENT_SCRIPT_URL" > "$INSTALL_SCRIPT"
+  fi
+  chmod 700 "$INSTALL_SCRIPT"
+}
+
 install_cron() {
-  local script_path
-  script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
   mkdir -p "$(dirname "$LOG_FILE")"
 
-  local entry="*/5 * * * * $(shell_quote "$script_path") --config $(shell_quote "$CONFIG_FILE") >> $(shell_quote "$LOG_FILE") 2>&1 ${CRON_TAG}"
+  local entry="*/5 * * * * $(shell_quote "$INSTALL_SCRIPT") --config $(shell_quote "$CONFIG_FILE") >> $(shell_quote "$LOG_FILE") 2>&1 ${CRON_TAG}"
   local current
   current="$(mktemp)"
   crontab -l 2>/dev/null | grep -vF "$CRON_TAG" > "$current" || true
@@ -323,6 +358,72 @@ uninstall_cron() {
   crontab "$current"
   rm -f "$current"
   printf 'Removed crontab entries tagged %s\n' "$CRON_TAG"
+}
+
+api_root_from_endpoint() {
+  local endpoint="$1"
+  endpoint="$(normalize_endpoint "$endpoint")"
+  if [[ "$endpoint" =~ ^(https?://[^/]+) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return
+  fi
+  die "could not derive Manager API root from --manage-endpoint"
+}
+
+delete_remote_records() {
+  validate_required
+
+  local api_root body records_json type record_types body_file meta_file error_file curl_status http_code content_type
+  api_root="$(api_root_from_endpoint "$URL")"
+
+  case "$TYPE" in
+    A) record_types=("A") ;;
+    AAAA) record_types=("AAAA") ;;
+    AUTO|BOTH) record_types=("A" "AAAA") ;;
+    *) die "--record-type must be auto, A, AAAA, or both" ;;
+  esac
+
+  records_json=""
+  for type in "${record_types[@]}"; do
+    records_json+="${records_json:+,}{\"domain\":\"$(json_escape "$DOMAIN")\",\"host\":\"$(json_escape "$HOST")\",\"type\":\"${type}\"}"
+  done
+  body="{\"records\":[${records_json}]}"
+
+  body_file="$(mktemp)"
+  meta_file="$(mktemp)"
+  error_file="$(mktemp)"
+
+  if curl --silent --show-error \
+    --request DELETE \
+    --output "$body_file" \
+    --write-out "%{http_code}\n%{content_type}" \
+    --header "Authorization: Bearer ${TOKEN}" \
+    --header "content-type: application/json" \
+    --data "$body" \
+    "${api_root}/api/records" > "$meta_file" 2> "$error_file"; then
+    curl_status=0
+  else
+    curl_status=$?
+  fi
+
+  http_code="$(sed -n '1p' "$meta_file")"
+  content_type="$(sed -n '2p' "$meta_file")"
+  if [[ "$curl_status" -ne 0 || ! "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    print_endpoint_error "${http_code:-000}" "$content_type" "$body_file" "$(tr '\n' ' ' < "$error_file" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+  fi
+  if [[ "$content_type" != *json* ]] && ! body_looks_like_json "$body_file"; then
+    print_endpoint_error "$http_code" "$content_type" "$body_file" ""
+  fi
+
+  cat "$body_file"
+  printf '\n'
+  rm -f "$body_file" "$meta_file" "$error_file"
+}
+
+remove_local_files() {
+  rm -f "$CONFIG_FILE"
+  rm -f "$INSTALL_SCRIPT"
+  rmdir "$(dirname "$CONFIG_FILE")" "$APP_DIR" 2>/dev/null || true
 }
 
 run_update() {
@@ -377,10 +478,19 @@ case "$MODE" in
   install)
     run_update
     write_config
+    install_script_file
     install_cron
     ;;
   uninstall)
+    if [[ "$CONFIG_LOADED" == "true" || -n "$URL$TOKEN$DOMAIN" ]]; then
+      if ! ( delete_remote_records ); then
+        printf 'warning: failed to delete remote DNS record; continuing local uninstall.\n' >&2
+      fi
+    else
+      printf 'warning: no client config found at %s; skipping remote DNS deletion.\n' "$CONFIG_FILE" >&2
+    fi
     uninstall_cron
+    remove_local_files
     ;;
   run)
     run_update

@@ -787,8 +787,8 @@ async function deleteDnsRecords(request, env, auth) {
     if (type !== "A" && type !== "AAAA") {
       throw httpError(400, "invalid_type", "Only A and AAAA records can be deleted.");
     }
-    const name = normalizeDomain(item.name);
     const config = selectDomainConfig(configs, item.domain);
+    const name = item.host ? buildFqdn(normalizeHost(item.host), config.domain) : normalizeDomain(item.name);
     if (name === config.domain || !name.endsWith(`.${config.domain}`)) {
       throw httpError(403, "domain_not_allowed", `${name} is not under ${config.domain}.`);
     }
@@ -800,9 +800,16 @@ async function deleteDnsRecords(request, env, auth) {
       }
     }
 
-    await deleteCloudflareRecord(env, config.zoneId, item.id);
+    const record = item.id
+      ? { id: String(item.id) }
+      : await findCloudflareRecord(env, config.zoneId, type, name);
+    if (!record?.id) {
+      continue;
+    }
+
+    await deleteCloudflareRecord(env, config.zoneId, record.id);
     await env.DDNS_TOKENS.delete(recordOwnerKey(type, name));
-    deleted.push({ id: item.id, type, name });
+    deleted.push({ id: record.id, type, name });
   }
 
   return { ok: true, deleted };
@@ -944,6 +951,17 @@ async function upsertDnsRecord({ env, zoneId, type, name, content, ttl, proxied,
   });
   await setRecordOwner(env, type, name, auth);
   return { type, name, content, action: "created", id: created.result?.id };
+}
+
+async function findCloudflareRecord(env, zoneId, type, name) {
+  const baseUrl = env.CF_API_BASE || "https://api.cloudflare.com/client/v4";
+  const searchUrl = new URL(`${baseUrl}/zones/${zoneId}/dns_records`);
+  searchUrl.searchParams.set("type", type);
+  searchUrl.searchParams.set("name", name);
+  const data = await cloudflareFetch(searchUrl, {
+    headers: { authorization: `Bearer ${env.CF_API_TOKEN}` },
+  });
+  return data.result?.[0] || null;
 }
 
 async function deleteCloudflareRecord(env, zoneId, recordId) {

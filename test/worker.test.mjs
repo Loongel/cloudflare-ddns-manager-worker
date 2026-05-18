@@ -224,6 +224,44 @@ test("admin can delete dns records from manager", async () => {
   }
 });
 
+test("manager can delete dns records by host without record id", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init });
+    if (String(url).includes("/dns_records?")) {
+      return Response.json({ success: true, result: [{ id: "record-a" }] });
+    }
+    return Response.json({ success: true, result: { id: "record-a" } });
+  };
+
+  try {
+    const response = await worker.fetch(
+      new Request("https://worker.test/api/records", {
+        method: "DELETE",
+        headers: {
+          authorization: "Bearer client-secret",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          records: [{ domain: "home.example.com", type: "A", host: "nas" }],
+        }),
+      }),
+      env,
+    );
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(body.deleted[0].id, "record-a");
+    assert.match(calls[0].url, /type=A/);
+    assert.match(calls[0].url, /name=nas\.home\.example\.com/);
+    assert.equal(calls[1].init.method, "DELETE");
+    assert.match(calls[1].url, /\/zones\/zone-1\/dns_records\/record-a$/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("creates A record with inferred caller IPv4", async () => {
   const calls = [];
   const originalFetch = globalThis.fetch;
