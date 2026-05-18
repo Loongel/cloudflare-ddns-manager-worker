@@ -1,10 +1,15 @@
 # Cloudflare DDNS Manager Worker
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Loongel/cloudflare-ddns-manager-worker)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/Loongel/cloudflare-ddns-manager-worker?style=social)](https://github.com/Loongel/cloudflare-ddns-manager-worker/stargazers)
 
-Cloudflare Worker DDNS 管理器，内置 Web Manager、KV-backed scoped token registry 和 cron-friendly 本地客户端。客户端只调用你自己的 Worker，不持有 Cloudflare API Token，适合家庭宽带、办公室出口、边缘节点和 VPS 动态公网 IP 更新。
+Cloudflare Worker DDNS 管理器。它把 DDNS 更新接口、Web Manager、Scoped Token、KV 记录归属和 Linux cron 客户端打包在一起，让客户端机器只持有 DDNS token，不持有 Cloudflare API Token。
 
-## Features
+适合家庭宽带、办公室出口、边缘节点、NAS、路由器和 VPS 的动态公网 IP 更新。
+
+## What You Get
 
 - 固定 DDNS API：`/ddns/update`，兼容 `/update`。
 - Web Manager：查看记录、创建客户端 Token、启用/禁用/删除 Token、删除 DNS 记录。
@@ -14,6 +19,7 @@ Cloudflare Worker DDNS 管理器，内置 Web Manager、KV-backed scoped token r
 - IPv4/IPv6：支持 A、AAAA、AUTO、BOTH 更新。
 - KV 记录归属：Token 和记录归属保存在 Cloudflare KV。
 - 本地客户端：可安装到当前用户 crontab，每 5 分钟自动更新。
+- 重复安装安全：同一 `# cf-ddns-manager` crontab 条目会被替换，不会重复累加。
 
 ## Quick Start
 
@@ -27,10 +33,21 @@ https://deploy.workers.cloudflare.com/?url=https://github.com/Loongel/cloudflare
 
 Cloudflare 会基于仓库里的 `wrangler.jsonc` 创建 Worker，并自动 provision `DDNS_TOKENS` KV namespace。
 
-也可以用一行命令从 GitHub 在线拉取项目并运行高级部署脚本。先替换里面的域名、Zone ID 和 Token：
+也可以用在线命令从 GitHub 拉取项目并运行高级部署脚本。它是一条 shell 命令，README 中分行只是为了可读性。先替换里面的域名、Zone ID 和 Token：
 
 ```bash
-WORKER_NAME=cf-ddns MANAGE_ENDPOINT=ddns.example.com DDNS_DOMAIN=home.example.com CF_ZONE_ID=your-cloudflare-zone-id CF_API_TOKEN=your-zone-dns-edit-token bash -c 'set -euo pipefail; tmp="$(mktemp -d)"; curl -fsSL https://github.com/Loongel/cloudflare-ddns-manager-worker/archive/refs/heads/main.tar.gz | tar -xz -C "$tmp" --strip-components=1; cd "$tmp"; npm install; npm run deploy:test'
+WORKER_NAME=cf-ddns \
+MANAGE_ENDPOINT=ddns.example.com \
+DDNS_DOMAIN=home.example.com \
+CF_ZONE_ID=your-cloudflare-zone-id \
+CF_API_TOKEN=your-zone-dns-edit-token \
+bash -c 'set -euo pipefail
+tmp="$(mktemp -d)"
+curl -fsSL https://github.com/Loongel/cloudflare-ddns-manager-worker/archive/refs/heads/main.tar.gz |
+  tar -xz -C "$tmp" --strip-components=1
+cd "$tmp"
+npm install
+npm run deploy:test'
 ```
 
 部署时需要填写这些 secrets：
@@ -102,6 +119,45 @@ https://your-worker.workers.dev/
 ```
 
 用 `DDNS_ADMIN_TOKEN` 登录后可以查看全部记录、创建新的 scoped token、管理 token 状态和删除 DNS 记录。用 scoped token 登录时，只能查看和管理该 token 自己创建的记录。
+
+## Install Client
+
+推荐在客户端机器上使用 scoped token。客户端只保存 DDNS token，只访问你自己的 Worker，不保存 Cloudflare API Token。
+
+在线安装命令如下。它是一条 shell 命令，README 中分行只是为了可读性：
+
+```bash
+curl -fsSL \
+  https://raw.githubusercontent.com/Loongel/cloudflare-ddns-manager-worker/main/scripts/ddns-client.sh |
+  bash -s -- \
+    --install \
+    --manage-endpoint your-worker.workers.dev \
+    --ddns-token 'your-scoped-token' \
+    --ddns-suffix home.example.com \
+    --sub-domain nas
+```
+
+安装后路径：
+
+```text
+~/.local/share/cf-ddns-manager/ddns-client.sh
+~/.config/cf-ddns-manager/client.env
+~/.cache/cf-ddns-manager/client.log
+```
+
+默认 `--record-type auto` 会分别尝试 `curl -4` 和 `curl -6` 探测公网 IPv4/IPv6。
+机器同时具备 IPv4 和 IPv6 出口时，会同时提交 A 和 AAAA；只有一种出口可用时，只提交可探测到的记录。
+探测到的地址只用于当次更新，不会固化写入 `client.env`。
+
+重复执行安装命令是安全的：配置会覆盖写入，crontab 中旧的 `# cf-ddns-manager` 条目会先移除再写入新条目。
+
+卸载：
+
+```bash
+~/.local/share/cf-ddns-manager/ddns-client.sh --uninstall
+```
+
+卸载会读取本地配置，先请求 Worker 删除当前客户端对应的 DNS 记录，再移除 crontab、客户端配置和本地脚本。记录不存在或不属于当前 token 时，会提示 skipped，但本地卸载仍会继续。
 
 ## Configuration
 
@@ -199,42 +255,12 @@ npm run deploy
 
 不要提交真实 `wrangler.toml`、`.dev.vars`、`cf-ddns-deploy.env` 或任何 secret。
 
-## Client Installation
-
-推荐在客户端机器上使用 scoped token。客户端只保存 DDNS token，只访问你自己的 Worker，不保存 Cloudflare API Token。
-
-在线一行安装，先替换 Worker 域名、Token、DDNS 后缀和节点名：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Loongel/cloudflare-ddns-manager-worker/main/scripts/ddns-client.sh | bash -s -- --install --manage-endpoint your-worker.workers.dev --ddns-token 'your-scoped-token' --ddns-suffix home.example.com --sub-domain nas
-```
-
-安装脚本会把客户端固定保存到：
-
-```text
-~/.local/share/cf-ddns-manager/ddns-client.sh
-```
-
-crontab 会引用这个固定路径，不会引用你执行命令时的当前目录或临时脚本路径。
-
-安装到当前用户 crontab：
-
-```bash
-./scripts/ddns-client.sh --install \
-  --manage-endpoint your-worker.workers.dev \
-  --ddns-token 'your-scoped-token' \
-  --ddns-suffix home.example.com \
-  --sub-domain nas
-```
-
-如果 `--ddns-suffix` 和管理域名相同，可以省略。未指定 `--sub-domain` 时，客户端默认使用本机短 hostname。
-
-默认 `--record-type auto` 会在客户端分别尝试 `curl -4` 和 `curl -6` 探测公网 IPv4/IPv6。机器同时具备 IPv4 和 IPv6 出口时，会同时提交 A 和 AAAA；只有一种出口可用时，只提交可探测到的记录。探测到的地址只用于当次更新，不会固化写入 `client.env`。
+## Client Commands
 
 指定 IPv4：
 
 ```bash
-./scripts/ddns-client.sh \
+~/.local/share/cf-ddns-manager/ddns-client.sh \
   --manage-endpoint your-worker.workers.dev \
   --ddns-token 'your-scoped-token' \
   --ddns-suffix home.example.com \
@@ -245,7 +271,7 @@ crontab 会引用这个固定路径，不会引用你执行命令时的当前目
 指定 IPv6：
 
 ```bash
-./scripts/ddns-client.sh \
+~/.local/share/cf-ddns-manager/ddns-client.sh \
   --manage-endpoint your-worker.workers.dev \
   --ddns-token 'your-scoped-token' \
   --ddns-suffix home.example.com \
@@ -254,31 +280,24 @@ crontab 会引用这个固定路径，不会引用你执行命令时的当前目
   --ipv6 2001:db8::10
 ```
 
-卸载当前用户 crontab：
-
-```bash
-./scripts/ddns-client.sh --uninstall
-```
-
-卸载会读取本地配置，先请求 Worker 删除当前客户端对应的 DNS 记录，再移除 crontab、客户端配置和 `~/.local/share/cf-ddns-manager/ddns-client.sh`。如果远端删除失败，脚本会提示 warning，但仍会继续清理本地安装。
-
-配置文件：
-
-```text
-~/.config/cf-ddns-manager/client.env
-```
-
-日志文件：
-
-```text
-~/.cache/cf-ddns-manager/client.log
-```
-
 查看帮助：
 
 ```bash
-./scripts/ddns-client.sh --help
+~/.local/share/cf-ddns-manager/ddns-client.sh --help
 ```
+
+常用参数：
+
+| Option | 说明 |
+| --- | --- |
+| `--manage-endpoint` | Worker 管理域名或更新接口，例如 `ddns.example.com` |
+| `--ddns-token` | Admin token 或 scoped token |
+| `--ddns-suffix` | DDNS 后缀，例如 `home.example.com` |
+| `--sub-domain` | 主机短名，例如 `nas`，不要传完整域名 |
+| `--record-type` | `auto`、`A`、`AAAA`、`both`，默认 `auto` |
+| `--ipv4` / `--ipv6` | 显式指定 IP，跳过对应地址族的自动探测 |
+| `--ttl` | 覆盖 DNS TTL |
+| `--proxied` | 覆盖 Cloudflare proxy 开关 |
 
 ## HTTP API
 
@@ -372,6 +391,10 @@ wrangler.toml.example      手动部署配置示例
 .dev.vars.example          本地开发 secret 模板
 cf-ddns-deploy.env.example 高级部署脚本 env 模板
 ```
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Loongel/cloudflare-ddns-manager-worker&type=Date)](https://www.star-history.com/#Loongel/cloudflare-ddns-manager-worker&Date)
 
 ## License
 

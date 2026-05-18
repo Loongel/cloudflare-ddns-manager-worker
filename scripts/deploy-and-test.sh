@@ -474,15 +474,21 @@ main() {
   printf 'Admin token: full manager access, can create scoped tokens in the web UI.\n'
   printf 'Scoped token: can manage only records it creates.\n'
   printf 'Admin install command:\n'
-  printf './scripts/ddns-client.sh --install --manage-endpoint %s --ddns-token %s %s--sub-domain YOUR_NODE_NAME\n' \
-    "$(shell_quote "$manager_host")" \
-    "$(shell_quote "$DDNS_ADMIN_TOKEN")" \
-    "${suffix_args[*]:+${suffix_args[*]} }"
+  printf './scripts/ddns-client.sh --install \\\n'
+  printf '  --manage-endpoint %s \\\n' "$(shell_quote "$manager_host")"
+  printf '  --ddns-token %s \\\n' "$(shell_quote "$DDNS_ADMIN_TOKEN")"
+  if [[ ${#suffix_args[@]} -gt 0 ]]; then
+    printf '  %s %s \\\n' "${suffix_args[0]}" "${suffix_args[1]}"
+  fi
+  printf '  --sub-domain YOUR_NODE_NAME\n'
   printf 'Scoped install command:\n'
-  printf './scripts/ddns-client.sh --install --manage-endpoint %s --ddns-token %s %s--sub-domain YOUR_NODE_NAME\n' \
-    "$(shell_quote "$manager_host")" \
-    "$(shell_quote "$DDNS_TOKEN")" \
-    "${suffix_args[*]:+${suffix_args[*]} }"
+  printf './scripts/ddns-client.sh --install \\\n'
+  printf '  --manage-endpoint %s \\\n' "$(shell_quote "$manager_host")"
+  printf '  --ddns-token %s \\\n' "$(shell_quote "$DDNS_TOKEN")"
+  if [[ ${#suffix_args[@]} -gt 0 ]]; then
+    printf '  %s %s \\\n' "${suffix_args[0]}" "${suffix_args[1]}"
+  fi
+  printf '  --sub-domain YOUR_NODE_NAME\n'
 
   if [[ -n "$RESULT_FILE" ]]; then
     printf 'Saved deployment result and client secret to %s\n' "${RESULT_FILE#"$ROOT_DIR"/}"

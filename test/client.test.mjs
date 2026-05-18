@@ -169,6 +169,87 @@ fi
   assert.doesNotMatch(cron, new RegExp(`${home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/ddns-client\\.sh`));
 });
 
+test("client install is idempotent for crontab entries", async () => {
+  const home = await mkdtemp(join(tmpdir(), "cf-ddns-manager-"));
+  const fakeBin = join(home, "bin");
+  await mkdir(fakeBin, { recursive: true });
+
+  const fakeCrontab = join(fakeBin, "crontab");
+  await writeFile(
+    fakeCrontab,
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "-l" ]]; then
+  cat "\${HOME}/crontab.current" 2>/dev/null || exit 1
+else
+  cp "$1" "\${HOME}/crontab.installed"
+fi
+`,
+  );
+  await chmod(fakeCrontab, 0o755);
+
+  const fakeCurl = join(fakeBin, "curl");
+  await writeFile(
+    fakeCurl,
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+for ((i=1; i<=$#; i++)); do
+  if [[ "\${!i}" == "--output" ]]; then
+    j=$((i + 1))
+    out="\${!j}"
+  fi
+done
+printf '{"ok":true}\\n' > "$out"
+printf '200\\napplication/json'
+`,
+  );
+  await chmod(fakeCurl, 0o755);
+
+  await writeFile(
+    join(home, "crontab.current"),
+    [
+      "0 0 * * * /usr/bin/true # keep-me",
+      "*/5 * * * * /old/path/ddns-client.sh --config /old/client.env # cf-ddns-manager",
+      "",
+    ].join("\n"),
+  );
+
+  const result = spawnSync(
+    "bash",
+    [
+      clientPath,
+      "--install",
+      "--manage-endpoint",
+      "worker.example",
+      "--ddns-token",
+      "client-secret",
+      "--ddns-suffix",
+      "home.example.com",
+      "--sub-domain",
+      "nas",
+    ],
+    {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+      encoding: "utf8",
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.doesNotMatch(result.stdout, /Installed current user crontab:/);
+  assert.match(result.stdout, /Installed cf-ddns-manager client/);
+
+  const cron = await readFile(join(home, "crontab.installed"), "utf8");
+  assert.match(cron, /# keep-me/);
+  assert.equal((cron.match(/# cf-ddns-manager/g) || []).length, 1);
+  assert.doesNotMatch(cron, /\/old\/path\/ddns-client\.sh/);
+});
+
 test("client uninstall deletes remote records and local install", async () => {
   const home = await mkdtemp(join(tmpdir(), "cf-ddns-manager-"));
   const fakeBin = join(home, "bin");

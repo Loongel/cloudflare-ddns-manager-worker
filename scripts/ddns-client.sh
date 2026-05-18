@@ -381,6 +381,7 @@ install_script_file() {
 install_cron() {
   mkdir -p "$(dirname "$LOG_FILE")"
 
+  local schedule="*/5 * * * *"
   local entry="*/5 * * * * $(shell_quote "$INSTALL_SCRIPT") --config $(shell_quote "$CONFIG_FILE") >> $(shell_quote "$LOG_FILE") 2>&1 ${CRON_TAG}"
   local current
   current="$(mktemp)"
@@ -388,7 +389,12 @@ install_cron() {
   printf '%s\n' "$entry" >> "$current"
   crontab "$current"
   rm -f "$current"
-  printf 'Installed current user crontab: %s\n' "$entry"
+  printf 'Installed cf-ddns-manager client.\n'
+  printf '  Script:   %s\n' "$INSTALL_SCRIPT"
+  printf '  Config:   %s\n' "$CONFIG_FILE"
+  printf '  Log:      %s\n' "$LOG_FILE"
+  printf '  Schedule: %s\n' "$schedule"
+  printf '  Cron tag: %s\n' "$CRON_TAG"
 }
 
 uninstall_cron() {
