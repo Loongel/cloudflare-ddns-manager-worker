@@ -1,0 +1,30 @@
+name = "cloudflare-ddns-manager-worker"
+main = "src/worker.js"
+compatibility_date = "2026-05-16"
+
+# Non-secret defaults can be placed here. Secrets should be set with:
+#   npx wrangler secret put CF_API_TOKEN
+#   npx wrangler secret put DDNS_ADMIN_TOKEN
+#   npx wrangler secret put DDNS_TOKEN
+[secrets]
+required = ["CF_API_TOKEN", "DDNS_ADMIN_TOKEN", "DDNS_TOKEN"]
+
+[[kv_namespaces]]
+binding = "DDNS_TOKENS"
+id = "replace-with-kv-namespace-id"
+
+[vars]
+# JSON format is recommended. CSV is also supported:
+# DDNS_DOMAIN_CONFIGS = "home.example.com:ZONE_ID,lab.example.net:ZONE_ID"
+DDNS_DOMAIN_CONFIGS = """
+[
+  {
+    "domain": "home.example.com",
+    "zoneId": "replace-with-cloudflare-zone-id",
+    "ttl": 120,
+    "proxied": false
+  }
+]
+"""
+DEFAULT_TTL = "120"
+DEFAULT_PROXIED = "false"

@@ -1,0 +1,388 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_NAME="cf-ddns-manager"
+CRON_TAG="# ${APP_NAME}"
+CONFIG_FILE="${HOME}/.config/${APP_NAME}/client.env"
+LOG_FILE="${HOME}/.cache/${APP_NAME}/client.log"
+
+URL=""
+TOKEN=""
+DOMAIN=""
+HOST=""
+TYPE="auto"
+IPV4=""
+IPV6=""
+TTL=""
+PROXIED=""
+MODE="run"
+
+usage() {
+  cat <<'EOF'
+Cloudflare Worker DDNS client
+
+Usage:
+  ddns-client.sh --install --manage-endpoint ddns.example.com --ddns-token TOKEN [options]
+  ddns-client.sh --config ~/.config/cf-ddns-manager/client.env
+  ddns-client.sh --uninstall
+
+Required:
+  --manage-endpoint HOST_OR_URL  Manager hostname or update endpoint.
+                                 Example: ddns.example.com
+  --ddns-token TOKEN             Admin or scoped DDNS token.
+
+Options:
+  --ddns-suffix DOMAIN  DDNS suffix. Defaults to the --manage-endpoint hostname.
+  --sub-domain NAME     Sub-domain before the suffix. Defaults to `hostname -s`.
+  --record-type TYPE    auto, A, AAAA, or both. Defaults to auto.
+  --ipv4 IP             Explicit IPv4 address. If omitted, the Worker detects caller IP.
+  --ipv6 IP             Explicit IPv6 address. If omitted, the Worker detects caller IP.
+  --ttl SECONDS         Override DNS record TTL.
+  --proxied BOOL        Override Cloudflare proxy setting: true or false.
+  --config FILE         Load options from a config file.
+  --install             Save config and install current user's crontab to run every 5 minutes.
+  --uninstall           Remove this client's crontab entry for current user.
+  -h, --help            Show this help.
+
+Backward-compatible aliases:
+  --ddns-manager, --url, --endpoint     Same as --manage-endpoint.
+  --ddns-secret, --token, --secret      Same as --ddns-token.
+  --ddns-domain, --domain, --suffix     Same as --ddns-suffix.
+  --device, --host, --name              Same as --sub-domain.
+  --type                                Same as --record-type.
+
+Examples:
+  ddns-client.sh --install --manage-endpoint ddns.example.com \
+    --ddns-token 'change-me' --sub-domain nas
+
+  ddns-client.sh --manage-endpoint ddns.example.com \
+    --ddns-token 'change-me' --ddns-suffix home.example.com --sub-domain nas --ipv4 203.0.113.10
+EOF
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+need_value() {
+  local key="${1:-}"
+  local value="${2:-}"
+  [[ -n "$value" && "$value" != --* ]] || die "${key} requires a value"
+}
+
+normalize_endpoint() {
+  local endpoint="$1"
+  local path rest
+  endpoint="${endpoint#"${endpoint%%[![:space:]]*}"}"
+  endpoint="${endpoint%"${endpoint##*[![:space:]]}"}"
+
+  [[ -n "$endpoint" ]] || die "--manage-endpoint cannot be empty"
+  [[ "$endpoint" != *[[:space:]]* ]] || die "--manage-endpoint must not contain spaces"
+
+  if [[ "$endpoint" != http://* && "$endpoint" != https://* ]]; then
+    endpoint="https://${endpoint}"
+  fi
+  if [[ "$endpoint" =~ ^https?://[^/]+/?$ ]]; then
+    endpoint="${endpoint%/}/ddns/update"
+  fi
+  [[ "$endpoint" =~ ^https?://[^/]+/.+ ]] ||
+    die "--manage-endpoint must be a Manager hostname or URL, for example ddns.example.com"
+  rest="${endpoint#*://}"
+  path="/${rest#*/}"
+  path="${path%%\?*}"
+  [[ "$path" == "/ddns/update" || "$path" == "/update" ]] ||
+    die "--manage-endpoint path must be /ddns/update or /update. Prefer: --manage-endpoint ddns.example.com"
+
+  printf '%s' "$endpoint"
+}
+
+endpoint_host() {
+  local endpoint
+  endpoint="$(normalize_endpoint "$1")"
+  endpoint="${endpoint#https://}"
+  endpoint="${endpoint#http://}"
+  printf '%s' "${endpoint%%/*}"
+}
+
+validate_domain_labels() {
+  local value="$1"
+  local field="$2"
+  local label
+  local -a labels
+
+  [[ -n "$value" ]] || die "${field} cannot be empty"
+  [[ "$value" != .* && "$value" != *. ]] || die "${field} must not start or end with a dot"
+  IFS='.' read -r -a labels <<< "$value"
+  ((${#labels[@]} >= 1)) || die "${field} is invalid"
+  for label in "${labels[@]}"; do
+    [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] ||
+      die "${field} has an invalid DNS label: ${label:-<empty>}"
+  done
+}
+
+is_ipv4() {
+  local value="$1"
+  local part
+  local -a parts
+  [[ "$value" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+  IFS='.' read -r -a parts <<< "$value"
+  for part in "${parts[@]}"; do
+    ((10#$part >= 0 && 10#$part <= 255)) || return 1
+  done
+}
+
+is_ipv6() {
+  [[ "$1" =~ ^[0-9A-Fa-f:]+$ && "$1" == *:* && "$1" != ":" ]]
+}
+
+print_body_excerpt() {
+  local file="$1"
+  if [[ ! -s "$file" ]]; then
+    return
+  fi
+  tr '\n\r\t' '   ' < "$file" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' | cut -c 1-220
+}
+
+body_looks_like_html() {
+  local file="$1"
+  grep -Eiq '<!doctype html|<html[[:space:]>]|<head[[:space:]>]|<body[[:space:]>]' "$file"
+}
+
+body_looks_like_json() {
+  local file="$1"
+  grep -Eq '^[[:space:]]*[\{\[]' "$file"
+}
+
+print_endpoint_error() {
+  local http_code="$1"
+  local content_type="$2"
+  local body_file="$3"
+  local curl_error="$4"
+
+  if [[ -n "$curl_error" ]]; then
+    die "无法连接 --manage-endpoint：${URL}。${curl_error}"
+  fi
+
+  if body_looks_like_html "$body_file"; then
+    die "--manage-endpoint 返回 HTML，不是 DDNS API。请填写 Worker 管理域名。HTTP ${http_code}"
+  fi
+
+  if [[ "$content_type" != *json* ]] && ! body_looks_like_json "$body_file"; then
+    local excerpt
+    excerpt="$(print_body_excerpt "$body_file")"
+    if [[ -n "$excerpt" ]]; then
+      die "--manage-endpoint 返回非 JSON。HTTP ${http_code}，摘要：${excerpt}"
+    fi
+    die "--manage-endpoint 返回非 JSON。HTTP ${http_code}"
+  fi
+
+  printf 'DDNS 更新失败。HTTP %s：\n' "$http_code" >&2
+  sed -n '1,20p' "$body_file" >&2
+  die "请检查 endpoint、token、后缀和节点名称。"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --manage-endpoint|--ddns-manager|--endpoint|--ddns-endpoint|--manager|--url)
+      need_value "$1" "${2:-}"
+      URL="$2"
+      shift 2
+      ;;
+    --ddns-token|--ddns-secret|--secret|--token)
+      need_value "$1" "${2:-}"
+      TOKEN="$2"
+      shift 2
+      ;;
+    --ddns-suffix|--ddns-domain|--service-domain|--domain|--service|--suffix)
+      need_value "$1" "${2:-}"
+      DOMAIN="$2"
+      shift 2
+      ;;
+    --sub-domain|--device|--device-name|--host|--name|--subdomain)
+      need_value "$1" "${2:-}"
+      HOST="$2"
+      shift 2
+      ;;
+    --record-type|--type)
+      need_value "$1" "${2:-}"
+      TYPE="$2"
+      shift 2
+      ;;
+    --ipv4)
+      need_value "$1" "${2:-}"
+      IPV4="$2"
+      shift 2
+      ;;
+    --ipv6)
+      need_value "$1" "${2:-}"
+      IPV6="$2"
+      shift 2
+      ;;
+    --ttl)
+      need_value "$1" "${2:-}"
+      TTL="$2"
+      shift 2
+      ;;
+    --proxied)
+      need_value "$1" "${2:-}"
+      PROXIED="$2"
+      shift 2
+      ;;
+    --config)
+      need_value "$1" "${2:-}"
+      # shellcheck source=/dev/null
+      source "$2"
+      shift 2
+      ;;
+    --install)
+      MODE="install"
+      shift
+      ;;
+    --uninstall)
+      MODE="uninstall"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown option: $1"
+      ;;
+  esac
+done
+
+HOST="${HOST:-$(hostname -s 2>/dev/null || hostname)}"
+
+validate_required() {
+  [[ -n "$URL" ]] || die "--manage-endpoint is required. Example: --manage-endpoint ddns.example.com"
+  [[ -n "$TOKEN" ]] || die "--ddns-token is required"
+  URL="$(normalize_endpoint "$URL")"
+  if [[ -z "$DOMAIN" ]]; then
+    DOMAIN="$(endpoint_host "$URL")"
+  fi
+  [[ -n "$HOST" ]] || die "--sub-domain is empty and hostname could not be detected"
+  command -v curl >/dev/null 2>&1 || die "curl is required"
+
+  TYPE="${TYPE^^}"
+  validate_domain_labels "$DOMAIN" "--ddns-suffix"
+  [[ "$DOMAIN" == *.* ]] || die "--ddns-suffix should include at least one dot, for example home.example.com"
+  [[ "$HOST" != *.* ]] || die "--sub-domain should be only the node name, for example nas, not nas.${DOMAIN}"
+  validate_domain_labels "$HOST" "--sub-domain"
+  [[ "$TYPE" =~ ^(AUTO|A|AAAA|BOTH)$ ]] || die "--record-type must be auto, A, AAAA, or both"
+  [[ -z "$IPV4" ]] || is_ipv4 "$IPV4" || die "--ipv4 is not a valid IPv4 address"
+  [[ -z "$IPV6" ]] || is_ipv6 "$IPV6" || die "--ipv6 is not a valid IPv6 address"
+  if [[ -n "$TTL" ]]; then
+    [[ "$TTL" =~ ^[0-9]+$ && "$TTL" -ge 1 ]] || die "--ttl must be a positive integer"
+  fi
+  [[ -z "$PROXIED" || "${PROXIED,,}" =~ ^(true|false|1|0|yes|no|on|off)$ ]] ||
+    die "--proxied must be true or false"
+}
+
+shell_quote() {
+  printf '%q' "$1"
+}
+
+write_config() {
+  mkdir -p "$(dirname "$CONFIG_FILE")"
+  chmod 700 "$(dirname "$CONFIG_FILE")"
+  {
+    printf 'URL=%s\n' "$(shell_quote "$URL")"
+    printf 'TOKEN=%s\n' "$(shell_quote "$TOKEN")"
+    printf 'DOMAIN=%s\n' "$(shell_quote "$DOMAIN")"
+    printf 'HOST=%s\n' "$(shell_quote "$HOST")"
+    printf 'TYPE=%s\n' "$(shell_quote "$TYPE")"
+    printf 'IPV4=%s\n' "$(shell_quote "$IPV4")"
+    printf 'IPV6=%s\n' "$(shell_quote "$IPV6")"
+    printf 'TTL=%s\n' "$(shell_quote "$TTL")"
+    printf 'PROXIED=%s\n' "$(shell_quote "$PROXIED")"
+  } > "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE"
+}
+
+install_cron() {
+  local script_path
+  script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  mkdir -p "$(dirname "$LOG_FILE")"
+
+  local entry="*/5 * * * * $(shell_quote "$script_path") --config $(shell_quote "$CONFIG_FILE") >> $(shell_quote "$LOG_FILE") 2>&1 ${CRON_TAG}"
+  local current
+  current="$(mktemp)"
+  crontab -l 2>/dev/null | grep -vF "$CRON_TAG" > "$current" || true
+  printf '%s\n' "$entry" >> "$current"
+  crontab "$current"
+  rm -f "$current"
+  printf 'Installed current user crontab: %s\n' "$entry"
+}
+
+uninstall_cron() {
+  local current
+  current="$(mktemp)"
+  crontab -l 2>/dev/null | grep -vF "$CRON_TAG" > "$current" || true
+  crontab "$current"
+  rm -f "$current"
+  printf 'Removed crontab entries tagged %s\n' "$CRON_TAG"
+}
+
+run_update() {
+  validate_required
+
+  local body_file meta_file error_file curl_status http_code content_type
+  body_file="$(mktemp)"
+  meta_file="$(mktemp)"
+  error_file="$(mktemp)"
+  trap "rm -f '$body_file' '$meta_file' '$error_file'" EXIT
+
+  local args=(
+    --silent
+    --show-error
+    --get
+    --output "$body_file"
+    --write-out "%{http_code}\n%{content_type}"
+    --header "Authorization: Bearer ${TOKEN}"
+    --data-urlencode "domain=${DOMAIN}"
+    --data-urlencode "host=${HOST}"
+    --data-urlencode "type=${TYPE}"
+  )
+
+  [[ -z "$IPV4" ]] || args+=(--data-urlencode "ipv4=${IPV4}")
+  [[ -z "$IPV6" ]] || args+=(--data-urlencode "ipv6=${IPV6}")
+  [[ -z "$TTL" ]] || args+=(--data-urlencode "ttl=${TTL}")
+  [[ -z "$PROXIED" ]] || args+=(--data-urlencode "proxied=${PROXIED}")
+
+  if curl "${args[@]}" "$URL" > "$meta_file" 2> "$error_file"; then
+    curl_status=0
+  else
+    curl_status=$?
+  fi
+
+  http_code="$(sed -n '1p' "$meta_file")"
+  content_type="$(sed -n '2p' "$meta_file")"
+  if [[ "$curl_status" -ne 0 ]]; then
+    print_endpoint_error "${http_code:-000}" "$content_type" "$body_file" "$(tr '\n' ' ' < "$error_file" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+  fi
+  if [[ ! "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    print_endpoint_error "${http_code:-000}" "$content_type" "$body_file" ""
+  fi
+  if [[ "$content_type" != *json* ]] && ! body_looks_like_json "$body_file"; then
+    print_endpoint_error "$http_code" "$content_type" "$body_file" ""
+  fi
+
+  cat "$body_file"
+  printf '\n'
+}
+
+case "$MODE" in
+  install)
+    run_update
+    write_config
+    install_cron
+    ;;
+  uninstall)
+    uninstall_cron
+    ;;
+  run)
+    run_update
+    ;;
+esac

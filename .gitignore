@@ -1,0 +1,10 @@
+node_modules/
+.wrangler/
+.dev.vars
+*.env
+*.env.*
+cf-ddns-depl*.env
+.deploy-result.env
+wrangler.toml
+npm-debug.log*
+client.log
